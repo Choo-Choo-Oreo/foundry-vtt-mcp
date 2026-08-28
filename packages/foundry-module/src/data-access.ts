@@ -4837,13 +4837,17 @@ export class FoundryDataAccess {
     const { type, folder, nameFilter } = params;
     const nameLower = nameFilter ? nameFilter.toLowerCase() : null;
 
-    // Resolve folder filter to an id if a name/id was provided
+    // Resolve folder filter to an id if a name/id was provided. Accepts a bare name,
+    // a folder id, or a "/"-separated path (the last segment is matched by name).
     let folderId: string | null = null;
     if (folder && folder.trim().length > 0) {
       const folderTrimmed = folder.trim();
+      const leafName = folderTrimmed.split('/').pop()?.trim() || folderTrimmed;
       const folderDoc =
         (game as any).folders?.find(
-          (f: any) => f.type === 'Item' && (f.name === folderTrimmed || f.id === folderTrimmed)
+          (f: any) =>
+            f.type === 'Item' &&
+            (f.name === leafName || f.name === folderTrimmed || f.id === folderTrimmed)
         ) ?? null;
       if (!folderDoc) {
         return [];
@@ -4906,25 +4910,14 @@ export class FoundryDataAccess {
       throw new Error('updates array is required and must contain at least one entry');
     }
 
-    // Cache folder resolutions so we only look up / create each folder once
-    const folderCache = new Map<string, string>(); // folder param → folder id
+    // Cache folder resolutions so we only look up / create each folder path once
+    const folderCache = new Map<string, string>(); // folder param → leaf folder id
 
-    const resolveFolderId = async (folder: string): Promise<string> => {
+    const resolveFolderId = async (folder: string): Promise<string | null> => {
       if (folderCache.has(folder)) return folderCache.get(folder)!;
-      const folderTrimmed = folder.trim();
-      let folderDoc =
-        (game as any).folders?.find(
-          (f: any) => f.type === 'Item' && (f.name === folderTrimmed || f.id === folderTrimmed)
-        ) ?? null;
-      if (!folderDoc) {
-        folderDoc = await (Folder as any).create({
-          name: folderTrimmed,
-          type: 'Item',
-          parent: null,
-        });
-      }
-      folderCache.set(folder, folderDoc.id);
-      return folderDoc.id;
+      const id = await this.resolveFolderPath(folder, 'Item');
+      if (id) folderCache.set(folder, id);
+      return id;
     };
 
     const payload: Array<Record<string, any>> = [];
@@ -4945,7 +4938,8 @@ export class FoundryDataAccess {
       if (upd.img !== undefined) patch.img = upd.img;
       if (upd.system !== undefined) patch.system = upd.system;
       if (upd.folder !== undefined && upd.folder.trim().length > 0) {
-        patch.folder = await resolveFolderId(upd.folder.trim());
+        const folderId = await resolveFolderId(upd.folder.trim());
+        if (folderId) patch.folder = folderId;
       }
 
       payload.push(patch);
@@ -5029,25 +5023,16 @@ export class FoundryDataAccess {
       return doc;
     });
 
-    // Resolve or create the target folder
+    // Resolve or create the target folder. A "/"-separated `folder` nests
+    // (e.g. "Homebrew/Classes/Scrapwright" walks or creates the whole path).
     let folderDoc: any = null;
     if (folder && folder.trim().length > 0) {
-      const folderTrimmed = folder.trim();
-      folderDoc =
-        (game as any).folders?.find(
-          (f: any) => f.type === 'Item' && (f.name === folderTrimmed || f.id === folderTrimmed)
-        ) ?? null;
-
-      if (!folderDoc) {
-        folderDoc = await (Folder as any).create({
-          name: folderTrimmed,
-          type: 'Item',
-          parent: null,
-        });
-      }
-
-      for (const doc of payload) {
-        doc.folder = folderDoc.id;
+      const folderId = await this.resolveFolderPath(folder.trim(), 'Item');
+      if (folderId) {
+        folderDoc = (game as any).folders?.get?.(folderId) ?? { id: folderId, name: null };
+        for (const doc of payload) {
+          doc.folder = folderId;
+        }
       }
     }
 
@@ -7133,58 +7118,88 @@ export class FoundryDataAccess {
   }
 
   /**
-   * Get or create a folder for organizing MCP-generated content
+   * Resolve a folder by name, id, or "/"-separated path, creating any missing folders
+   * along the way. Examples:
+   *   "NPCs"                       -> flat folder "NPCs" (unchanged legacy behaviour)
+   *   "NPCs/Bosses/Act 1"          -> walks or creates NPCs -> Bosses -> Act 1, returns leaf id
+   *   "<existing folder id>"       -> returned as-is if it exists and matches `type`
+   * Segments are trimmed; empty segments (leading/trailing/double slashes) are ignored.
+   * Each segment is matched by name + type + parent, so "Heroes/Bosses" and
+   * "Villains/Bosses" produce two distinct "Bosses" folders under different parents.
+   * Returns null on failure so callers can fall back to creating content unfiled.
+   */
+  private async resolveFolderPath(
+    pathOrName: string,
+    // Folder document type: 'Actor' | 'JournalEntry' | 'Item' | 'Scene' | 'RollTable' | ...
+    type: string
+  ): Promise<string | null> {
+    try {
+      const raw = (pathOrName ?? '').trim();
+      if (!raw) return null;
+
+      // Exact id match wins (back-compat: some callers pass a folder id, not a name)
+      const byId = (game as any).folders?.get?.(raw);
+      if (byId && byId.type === type) return byId.id;
+
+      const segments = raw
+        .split('/')
+        .map(s => s.trim())
+        .filter(s => s.length > 0);
+      if (segments.length === 0) return null;
+
+      const color = type === 'Actor' ? '#4a90e2' : type === 'JournalEntry' ? '#f39c12' : undefined;
+
+      let parentId: string | null = null;
+      let leafId: string | null = null;
+
+      for (const name of segments) {
+        const existing = (game as any).folders?.find(
+          (f: any) =>
+            f.type === type && f.name === name && (f.folder?.id ?? f.folder ?? null) === parentId
+        );
+
+        if (existing) {
+          parentId = existing.id;
+          leafId = existing.id;
+          continue;
+        }
+
+        const created = await (Folder as any).create({
+          name,
+          type,
+          folder: parentId, // Foundry v10+ nests folders via the `folder` field
+          color,
+          sort: 0,
+          flags: {
+            'foundry-mcp-bridge': {
+              mcpGenerated: true,
+              createdAt: new Date().toISOString(),
+            },
+          },
+        });
+
+        parentId = created?.id ?? null;
+        leafId = created?.id ?? null;
+        if (!leafId) return null; // creation failed mid-path
+      }
+
+      return leafId;
+    } catch (error) {
+      console.warn(`[${this.moduleId}] Failed to resolve folder path "${pathOrName}":`, error);
+      // Return null so content is created without a folder rather than failing outright
+      return null;
+    }
+  }
+
+  /**
+   * Get or create a folder for organizing MCP-generated content.
+   * Thin wrapper around resolveFolderPath so a "/"-separated name nests.
    */
   private async getOrCreateFolder(
     folderName: string,
     type: 'Actor' | 'JournalEntry'
   ): Promise<string | null> {
-    try {
-      // Look for existing folder
-      const existingFolder = game.folders?.find(
-        (f: any) => f.name === folderName && f.type === type
-      );
-
-      if (existingFolder) {
-        return existingFolder.id;
-      }
-
-      // Create appropriate descriptions
-      let description = '';
-      if (type === 'Actor') {
-        if (folderName === 'Foundry MCP Creatures') {
-          description = 'Creatures and monsters created via Foundry MCP Bridge';
-        } else {
-          description = `NPCs and creatures related to: ${folderName}`;
-        }
-      } else {
-        description = `Quest and content for: ${folderName}`;
-      }
-
-      // Create new folder
-      const folderData = {
-        name: folderName,
-        type,
-        description,
-        color: type === 'Actor' ? '#4a90e2' : '#f39c12', // Blue for actors, orange for journals
-        sort: 0,
-        parent: null,
-        flags: {
-          'foundry-mcp-bridge': {
-            mcpGenerated: true,
-            createdAt: new Date().toISOString(),
-            questContext: type === 'JournalEntry' ? folderName : undefined,
-          },
-        },
-      };
-
-      const folder = await Folder.create(folderData);
-      return folder?.id || null;
-    } catch (error) {
-      console.warn(`[${this.moduleId}] Failed to create folder "${folderName}":`, error);
-      // Return null so items are created without folders rather than failing
-      return null;
-    }
+    return this.resolveFolderPath(folderName, type);
   }
 
   /**
