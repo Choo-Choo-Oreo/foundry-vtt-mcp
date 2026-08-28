@@ -7202,6 +7202,147 @@ export class FoundryDataAccess {
     return this.resolveFolderPath(folderName, type);
   }
 
+  /** Full "/"-joined path from the root down to (and including) this folder. */
+  private folderFullPath(folder: any): string {
+    const names: string[] = [];
+    let cur: any = folder;
+    const seen = new Set<string>();
+    while (cur && !seen.has(cur.id)) {
+      seen.add(cur.id);
+      names.unshift(cur.name);
+      cur = cur.folder ?? null;
+    }
+    return names.join('/');
+  }
+
+  /** Resolve an existing folder by id or "/"-path. Does NOT create. */
+  private findFolderByPath(idOrPath: string, type?: string): any {
+    const raw = (idOrPath ?? '').trim();
+    if (!raw) return null;
+    const byId = (game as any).folders?.get?.(raw);
+    if (byId && (!type || byId.type === type)) return byId;
+
+    const segments = raw
+      .split('/')
+      .map((s: string) => s.trim())
+      .filter((s: string) => s.length > 0);
+    if (!segments.length) return null;
+
+    let parentId: string | null = null;
+    let match: any = null;
+    for (const name of segments) {
+      match =
+        (game as any).folders?.find(
+          (f: any) =>
+            (!type || f.type === type) &&
+            f.name === name &&
+            (f.folder?.id ?? f.folder ?? null) === parentId
+        ) ?? null;
+      if (!match) return null;
+      parentId = match.id;
+    }
+    return match;
+  }
+
+  /**
+   * Folder management: list / delete / rename / move folders of any document type.
+   */
+  async manageFolders(params: {
+    action: 'list' | 'delete' | 'rename' | 'move';
+    type?: string;
+    id?: string;
+    ids?: string[];
+    path?: string;
+    paths?: string[];
+    newName?: string;
+    newParent?: string | null;
+    deleteContents?: boolean;
+    deleteSubfolders?: boolean;
+  }): Promise<any> {
+    this.validateFoundryState();
+    const all: any[] = Array.from((game as any).folders ?? []);
+
+    if (params.action === 'list') {
+      const wantType = params.type;
+      const prefix = (params.path ?? '').trim().replace(/\/+$/, '');
+      const rows = all
+        .filter((f: any) => !wantType || f.type === wantType)
+        .map((f: any) => {
+          const fullPath = this.folderFullPath(f);
+          return {
+            id: f.id,
+            name: f.name,
+            type: f.type,
+            path: fullPath,
+            depth: fullPath.split('/').length - 1,
+            parentId: f.folder?.id ?? f.folder ?? null,
+            contents: (f.contents ?? []).length,
+            subfolders: all.filter((c: any) => (c.folder?.id ?? c.folder ?? null) === f.id).length,
+          };
+        })
+        .filter((r: any) => !prefix || r.path === prefix || r.path.startsWith(`${prefix}/`))
+        .sort((a: any, b: any) => a.type.localeCompare(b.type) || a.path.localeCompare(b.path));
+      return { folders: rows, total: rows.length };
+    }
+
+    // delete / rename / move all operate on target folder(s)
+    const targets: any[] = [];
+    const notFound: string[] = [];
+    const push = (ref: string) => {
+      const f = this.findFolderByPath(ref, params.type);
+      if (f) targets.push(f);
+      else notFound.push(ref);
+    };
+    if (params.id) push(params.id);
+    if (params.path) push(params.path);
+    for (const x of params.ids ?? []) push(x);
+    for (const x of params.paths ?? []) push(x);
+
+    if (!targets.length) {
+      throw new Error(
+        `No folder found for: ${[...(params.id ? [params.id] : []), ...(params.path ? [params.path] : []), ...(params.ids ?? []), ...(params.paths ?? [])].join(', ') || '(nothing specified)'}`
+      );
+    }
+
+    if (params.action === 'delete') {
+      const deleteContents = params.deleteContents === true;
+      const deleteSubfolders = params.deleteSubfolders !== false; // default true
+      const deleted: Array<{ id: string; name: string; path: string }> = [];
+      for (const f of targets) {
+        const path = this.folderFullPath(f);
+        await f.delete({ deleteSubfolders, deleteContents });
+        deleted.push({ id: f.id, name: f.name, path });
+      }
+      this.auditLog('manageFolders.delete', { count: deleted.length, deleteContents }, 'success');
+      return { deleted, notFound, deleteContents, deleteSubfolders };
+    }
+
+    if (params.action === 'rename') {
+      const newName = params.newName?.trim();
+      if (!newName) throw new Error('newName is required for rename');
+      const f = targets[0];
+      await f.update({ name: newName });
+      return {
+        renamed: { id: f.id, name: newName, path: this.folderFullPath(f) },
+        notFound,
+      };
+    }
+
+    if (params.action === 'move') {
+      const f = targets[0];
+      let newParentId: string | null = null;
+      const np = (params.newParent ?? '').toString().trim();
+      if (np) {
+        newParentId = await this.resolveFolderPath(np, f.type);
+        if (!newParentId) throw new Error(`Could not resolve destination parent: ${np}`);
+      }
+      await f.update({ folder: newParentId });
+      return { moved: { id: f.id, name: f.name, path: this.folderFullPath(f) }, notFound };
+    }
+
+    throw new Error(`Unknown manage-folders action: ${params.action}`);
+  }
+
   /**
    * List all scenes with filtering options
    */

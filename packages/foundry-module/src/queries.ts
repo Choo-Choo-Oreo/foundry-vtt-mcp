@@ -133,6 +133,9 @@ export class QueryHandlers {
     CONFIG.queries[`${modulePrefix}.updateActorItems`] = this.handleUpdateActorItems.bind(this);
     CONFIG.queries[`${modulePrefix}.deleteActorItems`] = this.handleDeleteActorItems.bind(this);
 
+    // Folder management (list / delete / rename / move — any document type)
+    CONFIG.queries[`${modulePrefix}.manageFolders`] = this.handleManageFolders.bind(this);
+
     // Phase 7: Token manipulation queries
     CONFIG.queries[`${modulePrefix}.move-token`] = this.handleMoveToken.bind(this);
     CONFIG.queries[`${modulePrefix}.update-token`] = this.handleUpdateToken.bind(this);
@@ -2090,5 +2093,26 @@ export class QueryHandlers {
     if (!gmCheck.allowed) return { error: 'Access denied', success: false };
     this.dataAccess.validateFoundryState();
     return this.dataAccess.deleteActorItems(data.actorIdentifier, data.itemIds);
+  }
+
+  private async handleManageFolders(data: {
+    action: 'list' | 'delete' | 'rename' | 'move';
+    type?: string;
+    id?: string;
+    ids?: string[];
+    path?: string;
+    paths?: string[];
+    newName?: string;
+    newParent?: string | null;
+    deleteContents?: boolean;
+    deleteSubfolders?: boolean;
+  }): Promise<any> {
+    if (data?.action !== 'list') {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) return { error: 'Access denied', success: false };
+    }
+    this.dataAccess.validateFoundryState();
+    if (!data?.action) throw new Error('action is required (list | delete | rename | move)');
+    return this.dataAccess.manageFolders(data);
   }
 }

@@ -24,6 +24,7 @@ import { SceneTools } from './tools/scene.js';
 
 import { ActorCreationTools } from './tools/actor-creation.js';
 import { ActorManagementTools } from './tools/actor-management.js';
+import { FolderManagementTools } from './tools/folder-management.js';
 
 import { QuestCreationTools } from './tools/quest-creation.js';
 
@@ -1194,6 +1195,7 @@ async function startBackend(): Promise<void> {
 
   const actorCreationTools = new ActorCreationTools({ foundryClient, logger });
   const actorManagementTools = new ActorManagementTools({ foundryClient, logger, systemRegistry });
+  const folderManagementTools = new FolderManagementTools({ foundryClient, logger });
 
   const dsa5CharacterCreator = new DSA5CharacterCreator({ foundryClient, logger });
 
@@ -1422,6 +1424,7 @@ async function startBackend(): Promise<void> {
 
     ...actorCreationTools.getToolDefinitions(),
     ...actorManagementTools.getToolDefinitions(),
+    ...folderManagementTools.getToolDefinitions(),
 
     ...dsa5CharacterCreator.getToolDefinitions(),
 
@@ -1601,6 +1604,13 @@ async function startBackend(): Promise<void> {
 
                 case 'manage-actors':
                   result = await actorManagementTools.handleManageActors(args);
+
+                  break;
+
+                // Folder management (list / delete / rename / move)
+
+                case 'manage-folders':
+                  result = await folderManagementTools.handleManageFolders(args);
 
                   break;
 
