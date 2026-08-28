@@ -10344,10 +10344,25 @@ export class FoundryDataAccess {
       const patch: Record<string, any> = {};
       if (u.name !== undefined) patch.name = u.name;
       if (u.img !== undefined) patch.img = u.img;
-      if (u.folder !== undefined && u.folder.trim().length > 0) {
+      if (u.folder !== undefined) {
+        // A blank "folder" used to be silently ignored — the update reported success
+        // but the actor never moved. Fail loudly instead.
+        const wanted = u.folder.trim();
+        if (wanted.length === 0) {
+          throw new Error(
+            `Update to "${actor.name}" was rejected: "folder" was empty. Give a folder name ` +
+              `or "/"-separated path. Moving an actor back to the top level isn't supported ` +
+              `here — delete the containing folder instead (its loose contents move up).`
+          );
+        }
         // "/"-separated path nests (walks/creates each folder); a bare name stays flat.
-        const folderId = await this.resolveFolderPath(u.folder.trim(), 'Actor');
-        if (folderId) patch.folder = folderId;
+        const folderId = await this.resolveFolderPath(wanted, 'Actor');
+        if (!folderId) {
+          throw new Error(
+            `Update to "${actor.name}" was rejected: folder "${wanted}" could not be resolved or created.`
+          );
+        }
+        patch.folder = folderId;
       }
       if (u.system !== undefined) {
         // Build a single patch.system nested object so Foundry deep-merges everything
@@ -10370,6 +10385,26 @@ export class FoundryDataAccess {
           }
         }
         patch.system = systemPatch;
+      }
+
+      // A PF2e party silently drops non-creature members in PartyPF2e#prepareBaseData,
+      // so a bad UUID would sit in _source as dead cruft with no error. Reject it here.
+      const memberPatch = patch.system?.details?.members;
+      if (actor.type === 'party' && Array.isArray(memberPatch)) {
+        const notCreatures: string[] = [];
+        for (const m of memberPatch) {
+          const uuid = typeof m === 'string' ? m : m?.uuid;
+          const ref: any = uuid ? await fromUuid(uuid) : null;
+          if (!ref || typeof ref.isOfType !== 'function' || !ref.isOfType('creature')) {
+            notCreatures.push(uuid ?? JSON.stringify(m));
+          }
+        }
+        if (notCreatures.length > 0) {
+          throw new Error(
+            `Update to "${actor.name}" was rejected: a party only accepts creature members ` +
+              `(character, npc, familiar). Not a creature: ${notCreatures.join(', ')}.`
+          );
+        }
       }
 
       // PF2e (CreaturePF2e#_preUpdate) clamps an incoming system.attributes.hp.value
