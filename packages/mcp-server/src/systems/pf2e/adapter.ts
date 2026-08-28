@@ -357,4 +357,213 @@ export class PF2eAdapter implements SystemAdapter {
 
     return stats;
   }
+
+  /**
+   * Human-readable PF2e actor schema reference for `manage-actors describe`.
+   *
+   * PF2e's DataModel accepts a malformed `system` payload into _source without
+   * complaint and only throws later, during prepareData() — at which point the
+   * sheet won't open and item operations fail with unrelated-looking errors.
+   * The field notes below are the ones that actually bite.
+   */
+  describeActorSchema(): string {
+    return [
+      '=== Pathfinder 2e Actor Schema Reference ===',
+      '',
+      'ACTOR TYPES: character, npc, familiar, hazard, loot, vehicle, party',
+      '',
+      'A PRISTINE `character` system looks like this — note what is null:',
+      '  abilities: null            (see ABILITIES warning below)',
+      '  traits/saves/proficiencies/build: null   (derived — never author)',
+      '  skills: {}                 (must EXIST; {} is correct for a blank PC)',
+      '  attributes: { hp: { value, temp } }      (NO speed key at all)',
+      '  details: { level:{value}, languages:{value:[],details:""},',
+      '             keyability:{value}, xp:{value,min,max}, biography:{...},',
+      '             age/height/weight/gender/ethnicity/nationality:{value} }',
+      '  resources: { heroPoints: { value, max } }',
+      '  pfs: { playerNumber, characterNumber, levelBump, currentFaction,',
+      '         school, reputation:{EA,GA,HH,VS,RO,VW} }',
+      '',
+      'NEVER AUTHOR on a character — prepareBaseData overwrites these every',
+      'cycle, and a hand-written value can break the build:',
+      '  build, saves, proficiencies, martial, traits, movement, perception,',
+      '  hands, crafting',
+      '  (NPCs are different: an npc DOES author system.saves.<save>.value and',
+      '   system.traits.value directly.)',
+      '',
+      'UNGUARDED READS — malformed or missing here throws during prepareData:',
+      '  attributes.speed   If present it MUST include otherSpeeds: [].',
+      '                     PF2e does `...speed.otherSpeeds` and spreading',
+      '                     undefined throws, aborting prepareBaseData before',
+      '                     it creates details.deities — which then surfaces as',
+      '                     an unrelated "setting \'primary\'" error when adding',
+      '                     a deity. Safest: omit speed and let the ancestry set',
+      '                     it. (normalizePayload injects otherSpeeds for you.)',
+      '  skills             Must exist; read as skills[k]?.rank for all 16.',
+      '  details.level.value, details.keyability.value, details.xp',
+      '  details.languages.value  Array. Invalid slugs are silently filtered,',
+      '                           not fatal — but the key must exist.',
+      '  resources.heroPoints, pfs',
+      '  attributes.hp      Needs at least { value, temp }.',
+      '',
+      'ABILITIES (character): supplying `abilities` AT ALL flips the sheet into',
+      '  manual-attribute mode (build.attributes.manual = true), which',
+      '  suppresses ancestry/background/class boosts. Leave it null unless you',
+      '  intend manual mode. Shape is { str: { mod: N }, ... } — the shorthand',
+      '  { str: N } is accepted and expanded for you.',
+      '',
+      'IWR — attributes.immunities / weaknesses / resistances:',
+      '  immunities:  [{ type, exceptions: [], source: null }]',
+      '  weaknesses:  [{ type, value, exceptions: [], applyOnce: false }]',
+      '  resistances: [{ type, value, exceptions: [], doubleVs: [] }]',
+      '  `value` is REQUIRED on weaknesses/resistances. A bare string ("fire")',
+      '  is accepted and expanded to { type: "fire" }. Type slugs come from',
+      '  CONFIG.PF2E.immunityTypes/weaknessTypes/resistanceTypes; an unknown',
+      '  slug does not throw, it simply never matches anything.',
+      '',
+      'SKILL KEYS (16, long form): acrobatics arcana athletics crafting',
+      '  deception diplomacy intimidation medicine nature occultism performance',
+      '  religion society stealth survival thievery.  Value shape: { rank: 0-4 }.',
+      '',
+      'ITEMS: every hand-authored PF2e item must include system.traits (object),',
+      '  system.rules (array), system.description {value,gm}, system.publication,',
+      '  and system.slug. ItemPF2e._preCreate reads _source.system.traits.value',
+      '  and _source.system.rules.filter() with no guard, so omitting either',
+      '  throws on create. Attach ancestry/heritage/background/class/deity to a',
+      '  character only AFTER the actor exists and prepares cleanly.',
+    ].join('\n');
+  }
+
+  /**
+   * Normalise/validate a PF2e system payload before it reaches Foundry.
+   *
+   * Called by manage-actors on every create and update. Runs for all actor
+   * types (the caller does not tell us which), so this only does things that
+   * are correct for every PF2e actor: repair known-fatal shapes, expand
+   * documented shorthands, and reject values whose type is outright wrong.
+   * Type-specific advice (e.g. "never author saves on a character") lives in
+   * describeActorSchema() rather than being enforced here.
+   */
+  normalizePayload(system: Record<string, any>): Record<string, any> {
+    if (!system || typeof system !== 'object' || Array.isArray(system)) return system;
+
+    const out: Record<string, any> = { ...system };
+
+    const isPlainObject = (v: any): v is Record<string, any> =>
+      typeof v === 'object' && v !== null && !Array.isArray(v);
+
+    // ── hard type rejections ────────────────────────────────────────────────
+    // These land in _source unchallenged and then quietly degrade the actor
+    // (e.g. `abilities: 42` prepares as {}), so fail loudly and early instead.
+    for (const key of ['abilities', 'skills', 'details', 'attributes', 'resources', 'pfs']) {
+      if (key in out && out[key] !== null && out[key] !== undefined && !isPlainObject(out[key])) {
+        throw new Error(
+          `PF2e: system.${key} must be an object (received ${Array.isArray(out[key]) ? 'array' : typeof out[key]}). ` +
+            `Run manage-actors action:"describe" for the expected shapes.`
+        );
+      }
+    }
+
+    // ── abilities: accept { str: 2 } shorthand for { str: { mod: 2 } } ───────
+    if (isPlainObject(out.abilities)) {
+      const abilities: Record<string, any> = {};
+      for (const [key, val] of Object.entries(out.abilities)) {
+        if (typeof val === 'number') {
+          abilities[key] = { mod: val };
+        } else if (isPlainObject(val)) {
+          abilities[key] = val;
+        } else {
+          throw new Error(
+            `PF2e: system.abilities.${key} must be a number or { mod: number } (received ${typeof val}).`
+          );
+        }
+      }
+      out.abilities = abilities;
+    }
+
+    // ── attributes ──────────────────────────────────────────────────────────
+    if (isPlainObject(out.attributes)) {
+      const attributes: Record<string, any> = { ...out.attributes };
+
+      if ('hp' in attributes && attributes.hp !== undefined && !isPlainObject(attributes.hp)) {
+        throw new Error(
+          `PF2e: system.attributes.hp must be an object like { value, max } (received ${typeof attributes.hp}).`
+        );
+      }
+
+      // speed MUST carry otherSpeeds — PF2e spreads it unguarded, and the
+      // resulting throw aborts prepareBaseData partway through, corrupting the
+      // actor in ways that surface much later and look unrelated.
+      if (isPlainObject(attributes.speed) && !Array.isArray(attributes.speed.otherSpeeds)) {
+        attributes.speed = { ...attributes.speed, otherSpeeds: [] };
+      }
+
+      attributes.immunities = this.normalizeIwr(attributes.immunities, 'immunities');
+      attributes.weaknesses = this.normalizeIwr(attributes.weaknesses, 'weaknesses');
+      attributes.resistances = this.normalizeIwr(attributes.resistances, 'resistances');
+      for (const key of ['immunities', 'weaknesses', 'resistances']) {
+        if (attributes[key] === undefined) delete attributes[key];
+      }
+
+      out.attributes = attributes;
+    }
+
+    // Same speed repair for callers using dot-notation paths.
+    const dotSpeed = out['attributes.speed'];
+    if (isPlainObject(dotSpeed) && !Array.isArray(dotSpeed.otherSpeeds)) {
+      out['attributes.speed'] = { ...dotSpeed, otherSpeeds: [] };
+    }
+
+    return out;
+  }
+
+  /**
+   * Coerce an immunities/weaknesses/resistances array into the shape PF2e's
+   * IWR classes expect. Bare strings become { type }; missing exception arrays
+   * are filled in. Unknown type slugs are left alone — PF2e tolerates them.
+   */
+  private normalizeIwr(entries: any, kind: 'immunities' | 'weaknesses' | 'resistances'): any {
+    if (entries === undefined || entries === null) return entries;
+    if (!Array.isArray(entries)) {
+      throw new Error(
+        `PF2e: system.attributes.${kind} must be an array (received ${typeof entries}). ` +
+          `Expected e.g. [{ type: "fire"${kind === 'immunities' ? '' : ', value: 5'} }].`
+      );
+    }
+
+    return entries.map((entry, idx) => {
+      const base = typeof entry === 'string' ? { type: entry } : entry;
+      if (typeof base !== 'object' || base === null || Array.isArray(base)) {
+        throw new Error(
+          `PF2e: system.attributes.${kind}[${idx}] must be a string or an object with a "type".`
+        );
+      }
+      if (typeof base.type !== 'string' || base.type.length === 0) {
+        throw new Error(`PF2e: system.attributes.${kind}[${idx}] is missing a "type" slug.`);
+      }
+
+      const normalized: Record<string, any> = {
+        ...base,
+        exceptions: Array.isArray(base.exceptions) ? base.exceptions : [],
+      };
+
+      if (kind === 'immunities') {
+        if (normalized.source === undefined) normalized.source = null;
+      } else {
+        if (typeof normalized.value !== 'number') {
+          throw new Error(
+            `PF2e: system.attributes.${kind}[${idx}] ("${base.type}") needs a numeric "value" ` +
+              `(e.g. { type: "${base.type}", value: 5 }).`
+          );
+        }
+        if (kind === 'weaknesses') {
+          if (normalized.applyOnce === undefined) normalized.applyOnce = false;
+        } else if (!Array.isArray(normalized.doubleVs)) {
+          normalized.doubleVs = [];
+        }
+      }
+
+      return normalized;
+    });
+  }
 }

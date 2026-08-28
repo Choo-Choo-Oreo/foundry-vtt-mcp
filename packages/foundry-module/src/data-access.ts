@@ -10271,8 +10271,42 @@ export class FoundryDataAccess {
     if (existing.length === 0)
       throw new Error('None of the provided item IDs were found on this actor');
 
-    await actor.deleteEmbeddedDocuments('Item', existing);
-    return { deleted: existing, total: existing.length };
+    try {
+      await actor.deleteEmbeddedDocuments('Item', existing);
+      this.assertActorPreparesOrThrow(actor);
+      return { deleted: existing, total: existing.length };
+    } catch (err) {
+      // The normal delete runs PF2e's grant-cascade / re-prep, which throws
+      // (e.g. `reading 'grantedBy'`) when the actor is already in a degraded
+      // state — often because of the very item we're trying to remove. Fall
+      // back to pulling the ids out of _source directly, bypassing the cascade.
+      try {
+        const kept = (actor._source.items ?? []).filter((i: any) => !existing.includes(i._id));
+        await actor.updateSource({ items: kept });
+        if (typeof actor.reset === 'function') actor.reset();
+        const stillThere = existing.filter(id => actor.items.get(id));
+        if (stillThere.length === 0) {
+          this.auditLog(
+            'deleteActorItems',
+            { actorId: actor.id, count: existing.length },
+            'success'
+          );
+          return { deleted: existing, total: existing.length };
+        }
+      } catch {
+        /* fall through to the descriptive error below */
+      }
+      this.auditLog(
+        'deleteActorItems',
+        { actorId: actor.id, count: existing.length },
+        'failure',
+        err instanceof Error ? err.message : String(err)
+      );
+      throw new Error(
+        `Could not remove the item(s) from "${actor.name}": ${err instanceof Error ? err.message : String(err)}. ` +
+          `The actor's data is in a state PF2e can't prepare — deleting the whole actor and rebuilding is usually the fastest fix.`
+      );
+    }
   }
 
   /**
