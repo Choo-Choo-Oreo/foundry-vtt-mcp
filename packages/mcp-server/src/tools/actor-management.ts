@@ -136,6 +136,12 @@ export class ActorManagementTools {
                     type: 'string',
                     description: 'New icon/portrait path.',
                   },
+                  folder: {
+                    type: 'string',
+                    description:
+                      'Move the actor to this folder (name, ID, or "/"-separated path, ' +
+                      'created if absent). "" leaves the folder unchanged.',
+                  },
                   system: {
                     type: 'object',
                     description:
@@ -329,6 +335,7 @@ export class ActorManagementTools {
             id: z.string().min(1),
             name: z.string().optional(),
             img: z.string().optional(),
+            folder: z.string().optional(),
             system: z.record(z.any()).optional(),
           })
         )

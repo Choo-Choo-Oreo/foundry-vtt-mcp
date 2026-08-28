@@ -9913,7 +9913,13 @@ export class FoundryDataAccess {
    * Merges supplied fields into the actor (top-level keys overwrite).
    */
   async updateActors(
-    updates: Array<{ id: string; name?: string; img?: string; system?: Record<string, any> }>
+    updates: Array<{
+      id: string;
+      name?: string;
+      img?: string;
+      folder?: string;
+      system?: Record<string, any>;
+    }>
   ): Promise<{ updated: Array<{ id: string; name: string }>; total: number }> {
     const updatedActors: Array<{ id: string; name: string }> = [];
 
@@ -9924,6 +9930,11 @@ export class FoundryDataAccess {
       const patch: Record<string, any> = {};
       if (u.name !== undefined) patch.name = u.name;
       if (u.img !== undefined) patch.img = u.img;
+      if (u.folder !== undefined && u.folder.trim().length > 0) {
+        // "/"-separated path nests (walks/creates each folder); a bare name stays flat.
+        const folderId = await this.resolveFolderPath(u.folder.trim(), 'Actor');
+        if (folderId) patch.folder = folderId;
+      }
       if (u.system !== undefined) {
         // Build a single patch.system nested object so Foundry deep-merges everything
         // in one pass without flat-key vs nested-key conflicts.
