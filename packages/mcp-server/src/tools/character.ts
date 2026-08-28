@@ -62,13 +62,20 @@ export class CharacterTools {
       {
         name: 'get-character',
         description:
-          'Retrieve character information optimized for minimal token usage. Returns: full stats (abilities, skills, saves, AC, HP), action names, active effects/conditions (name only), and ALL items with minimal metadata (name, type, equipped status) without descriptions. PF2e-specific: includes traits arrays for items/actions, action costs, rarity, and level. D&D 5e-specific: includes attunement status. Perfect for filtering (e.g., "deviant" trait feats, "fire" trait spells in PF2e), checking equipment, or identifying what to investigate further. Use get-character-entity to fetch full details for specific items, actions, spells, or effects.',
+          'Retrieve character information optimized for minimal token usage. Returns: full stats (abilities, skills, saves, AC, HP), action names, active effects/conditions (name only), and ALL items with minimal metadata (name, type, equipped status) without descriptions. PF2e-specific: includes traits arrays for items/actions, action costs, rarity, and level. D&D 5e-specific: includes attunement status. Perfect for filtering (e.g., "deviant" trait feats, "fire" trait spells in PF2e), checking equipment, or identifying what to investigate further. Use get-character-entity to fetch full details for specific items, actions, spells, or effects. Pass raw:true to also get a `raw` block with the stored _source for fields the curated view hides (details/biography/languages, immunities/weaknesses/resistances, pfs, build, proficiencies) — use it to verify a manage-actors update landed.',
         inputSchema: {
           type: 'object',
           properties: {
             identifier: {
               type: 'string',
               description: 'Character name or ID to look up',
+            },
+            raw: {
+              type: 'boolean',
+              description:
+                'Also return a `raw` block: the stored _source for system.details, traits, ' +
+                'attributes.immunities/weaknesses/resistances, pfs, build, saves, skills, ' +
+                'proficiencies — the fields the curated view omits.',
             },
           },
           required: ['identifier'],
@@ -290,15 +297,17 @@ export class CharacterTools {
   async handleGetCharacter(args: any): Promise<any> {
     const schema = z.object({
       identifier: z.string().min(1, 'Character identifier cannot be empty'),
+      raw: z.boolean().optional(),
     });
 
-    const { identifier } = schema.parse(args);
+    const { identifier, raw } = schema.parse(args);
 
-    this.logger.info('Getting character information', { identifier });
+    this.logger.info('Getting character information', { identifier, raw: raw === true });
 
     try {
       const characterData = await this.foundryClient.query('foundry-mcp-bridge.getCharacterInfo', {
         characterName: identifier,
+        raw: raw === true,
       });
 
       this.logger.debug('Successfully retrieved character data', {
@@ -307,7 +316,11 @@ export class CharacterTools {
       });
 
       // Format the response for Claude
-      return await this.formatCharacterResponse(characterData);
+      const formatted = await this.formatCharacterResponse(characterData);
+      if (raw === true && characterData?.raw !== undefined) {
+        return { ...formatted, raw: characterData.raw };
+      }
+      return formatted;
     } catch (error) {
       this.logger.error('Failed to get character information', error);
       throw new Error(

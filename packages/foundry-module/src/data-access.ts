@@ -1678,7 +1678,7 @@ export class FoundryDataAccess {
   /**
    * Get character/actor information by name or ID
    */
-  async getCharacterInfo(identifier: string): Promise<CharacterInfo> {
+  async getCharacterInfo(identifier: string, raw = false): Promise<CharacterInfo> {
     let actor: Actor | undefined;
 
     // Try to find by ID first, then by name
@@ -1816,6 +1816,39 @@ export class FoundryDataAccess {
     const spellcastingEntries = this.extractSpellcastingData(actor);
     if (spellcastingEntries.length > 0) {
       characterData.spellcasting = spellcastingEntries;
+    }
+
+    if (raw) {
+      // The curated view above hides most of `system`. `raw` returns the stored
+      // _source for the fields callers commonly write and can't otherwise read
+      // back (details, IWR, pfs, languages, build, proficiencies, ...).
+      const src: any = (actor as any)._source?.system ?? {};
+      const pick = (obj: any, keys: string[]) =>
+        keys.reduce((o: any, k) => (k in (obj ?? {}) ? ((o[k] = obj[k]), o) : o), {});
+      (characterData as any).raw = {
+        details: src.details ?? null,
+        traits: src.traits ?? null,
+        abilities: src.abilities ?? null,
+        attributes: pick(src.attributes, [
+          'hp',
+          'ac',
+          'speed',
+          'immunities',
+          'weaknesses',
+          'resistances',
+          'perception',
+          'initiative',
+          'classDC',
+        ]),
+        saves: src.saves ?? null,
+        skills: src.skills ?? null,
+        proficiencies: src.proficiencies ?? null,
+        martial: src.martial ?? null,
+        build: src.build ?? null,
+        resources: src.resources ?? null,
+        pfs: src.pfs ?? null,
+        spellcasting: src.spellcasting ?? null,
+      };
     }
 
     return characterData;
@@ -4697,19 +4730,20 @@ export class FoundryDataAccess {
       return doc;
     });
 
+    let created: any[] = [];
     try {
-      const created = await actor.createEmbeddedDocuments('Item', payload);
+      created = (await actor.createEmbeddedDocuments('Item', payload)) || [];
+      // Hand-authored items (esp. PF2e ancestry/heritage/class/feat) can throw
+      // during the actor's re-prep — e.g. an ancestry expects the actor to already
+      // have `system.traits`, a feat's language prep dereferences a null ancestry.
+      // Detect that and undo the add rather than leave the actor bricked.
+      this.assertActorPreparesOrThrow(actor);
 
       const result = {
         actorId: actor.id,
         actorName: actor.name,
-        created: (created || []).map((doc: any) => ({
-          id: doc.id,
-          name: doc.name,
-          type: doc.type,
-        })),
+        created: created.map((doc: any) => ({ id: doc.id, name: doc.name, type: doc.type })),
       };
-
       this.auditLog(
         'addActorItems',
         { actorIdentifier, actorId: actor.id, count: payload.length },
@@ -4717,13 +4751,26 @@ export class FoundryDataAccess {
       );
       return result;
     } catch (error) {
+      const ids = created.map((d: any) => d.id).filter(Boolean);
+      if (ids.length) {
+        await actor.deleteEmbeddedDocuments('Item', ids).catch(() => undefined);
+        try {
+          this.assertActorPreparesOrThrow(actor);
+        } catch {
+          /* actor without the bad items should prepare fine again */
+        }
+      }
       this.auditLog(
         'addActorItems',
         { actorIdentifier, actorId: actor.id, count: payload.length },
         'failure',
         error instanceof Error ? error.message : 'Unknown error'
       );
-      throw error;
+      throw new Error(
+        `Could not attach the item(s) to "${actor.name}": ${error instanceof Error ? error.message : String(error)}. ` +
+          `Any partially-added items were removed. On PF2e this usually means the actor is missing ` +
+          `scaffolding the item depends on (attach an ancestry + class first, then feats/spells).`
+      );
     }
   }
 
@@ -10053,6 +10100,18 @@ export class FoundryDataAccess {
    * Update one or more existing actors by ID.
    * Merges supplied fields into the actor (top-level keys overwrite).
    */
+  /**
+   * Re-run an actor's data preparation and throw if it fails. System data models
+   * (esp. PF2e) don't reject `actor.update()` for a malformed `system` payload —
+   * they accept it into `_source` and then throw on every later `prepareData()`,
+   * leaving the sheet unopenable and item ops broken. Callers use this after a
+   * write so they can roll back instead of bricking the actor.
+   */
+  private assertActorPreparesOrThrow(actor: any): void {
+    if (typeof actor.reset === 'function') actor.reset();
+    else actor.prepareData();
+  }
+
   async updateActors(
     updates: Array<{
       id: string;
@@ -10067,6 +10126,13 @@ export class FoundryDataAccess {
     for (const u of updates) {
       const actor = game.actors.get(u.id) as any;
       if (!actor) throw new Error(`Actor not found: ${u.id}`);
+      // Snapshot the fields we might touch so a bad payload can be rolled back.
+      const before = {
+        name: actor._source.name,
+        img: actor._source.img,
+        folder: actor._source.folder,
+        system: foundry.utils.deepClone(actor._source.system),
+      };
 
       const patch: Record<string, any> = {};
       if (u.name !== undefined) patch.name = u.name;
@@ -10104,18 +10170,50 @@ export class FoundryDataAccess {
       // update caps value at the old max. When both are present, apply max first and
       // value in a follow-up update.
       const hpPatch = patch.system?.attributes?.hp;
-      if (
+      const splitHp =
         hpPatch &&
         typeof hpPatch === 'object' &&
         hpPatch.max !== undefined &&
-        hpPatch.value !== undefined
-      ) {
-        const deferredHpValue = hpPatch.value;
-        delete hpPatch.value;
+        hpPatch.value !== undefined;
+      const deferredHpValue = splitHp ? hpPatch.value : undefined;
+      if (splitHp) delete hpPatch.value;
+
+      try {
         await actor.update(patch);
-        await actor.update({ 'system.attributes.hp.value': deferredHpValue });
-      } else {
-        await actor.update(patch);
+        if (splitHp) await actor.update({ 'system.attributes.hp.value': deferredHpValue });
+        // A malformed system payload is accepted into _source but breaks every
+        // later prepareData(). Detect that here and roll back rather than leave
+        // the actor bricked (unopenable sheet, failing item ops).
+        this.assertActorPreparesOrThrow(actor);
+      } catch (err) {
+        await actor
+          .update(
+            {
+              name: before.name,
+              img: before.img,
+              folder: before.folder,
+              system: before.system,
+            },
+            { diff: false, recursive: false }
+          )
+          .catch(() => undefined);
+        try {
+          this.assertActorPreparesOrThrow(actor);
+        } catch {
+          /* restored source is the known-good pre-write state */
+        }
+        this.auditLog(
+          'updateActors',
+          { id: u.id },
+          'failure',
+          err instanceof Error ? err.message : String(err)
+        );
+        throw new Error(
+          `Update to "${actor.name}" was rejected and rolled back: the payload left the actor ` +
+            `unable to prepare its data (${err instanceof Error ? err.message : String(err)}). ` +
+            `A system field was almost certainly given an invalid shape — check paths like ` +
+            `system.details.languages, system.attributes.immunities/weaknesses/resistances, system.pfs.`
+        );
       }
       updatedActors.push({ id: actor.id, name: u.name ?? actor.name });
     }

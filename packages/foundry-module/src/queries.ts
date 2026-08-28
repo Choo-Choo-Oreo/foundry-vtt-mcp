@@ -201,6 +201,7 @@ export class QueryHandlers {
   private async handleGetCharacterInfo(data: {
     characterName?: string;
     characterId?: string;
+    raw?: boolean;
   }): Promise<any> {
     try {
       // SECURITY: Silent GM validation
@@ -216,7 +217,7 @@ export class QueryHandlers {
         throw new Error('characterName or characterId is required');
       }
 
-      return await this.dataAccess.getCharacterInfo(identifier);
+      return await this.dataAccess.getCharacterInfo(identifier, data.raw === true);
     } catch (error) {
       throw new Error(
         `Failed to get character info: ${error instanceof Error ? error.message : 'Unknown error'}`
