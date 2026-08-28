@@ -7493,9 +7493,35 @@ export class FoundryDataAccess {
       const cleanUpdates = Object.fromEntries(
         Object.entries(data.updates).filter(([_, v]) => v !== undefined)
       );
+      const requestedProperties = Object.keys(cleanUpdates);
+
+      // PF2e derives a token's disposition from the linked actor's alliance on every
+      // data-prep pass, so a direct token.disposition write silently reverts. Route the
+      // request to the actor instead. SECRET (-2) has no alliance equivalent, so it
+      // still falls through to the normal token update.
+      if (
+        (game.system as any)?.id === 'pf2e' &&
+        cleanUpdates.disposition !== undefined &&
+        cleanUpdates.disposition !== -2 &&
+        token.actor
+      ) {
+        const allianceByDisposition: Record<number, string | null> = {
+          [-1]: 'opposition',
+          [0]: null,
+          [1]: 'party',
+        };
+        if (cleanUpdates.disposition in allianceByDisposition) {
+          await token.actor.update({
+            'system.details.alliance': allianceByDisposition[cleanUpdates.disposition as number],
+          });
+          delete cleanUpdates.disposition;
+        }
+      }
 
       // Apply updates
-      await token.update(cleanUpdates);
+      if (Object.keys(cleanUpdates).length > 0) {
+        await token.update(cleanUpdates);
+      }
 
       this.auditLog('updateToken', { tokenId: data.tokenId, updates: cleanUpdates }, 'success');
 
@@ -7503,7 +7529,7 @@ export class FoundryDataAccess {
         success: true,
         tokenId: token.id,
         tokenName: token.name,
-        updatedProperties: Object.keys(cleanUpdates),
+        updatedProperties: requestedProperties,
       };
     } catch (error) {
       this.auditLog(
@@ -7667,8 +7693,14 @@ export class FoundryDataAccess {
         throw new Error(`Token ${data.tokenId} has no associated actor`);
       }
 
-      // Get the condition configuration for the game system
-      const conditions = (CONFIG as any).statusEffects || [];
+      // Get the condition configuration for the game system.
+      // CONFIG.statusEffects is an array in core Foundry and most systems (D&D5e, DSA5),
+      // but PF2e replaces it with a slug-keyed object. Normalise to an array so the
+      // .find()/.map() calls below work regardless of system.
+      const rawStatusEffects = (CONFIG as any).statusEffects;
+      const conditions: any[] = Array.isArray(rawStatusEffects)
+        ? rawStatusEffects
+        : Object.values(rawStatusEffects ?? {});
       const condition = conditions.find(
         (c: any) =>
           c.id === data.conditionId || c.name?.toLowerCase() === data.conditionId.toLowerCase()
@@ -7764,7 +7796,12 @@ export class FoundryDataAccess {
     this.validateFoundryState();
 
     try {
-      const conditions = (CONFIG as any).statusEffects || [];
+      // CONFIG.statusEffects is an array in core Foundry and most systems (D&D5e, DSA5),
+      // but PF2e replaces it with a slug-keyed object. Normalise to an array.
+      const rawStatusEffects = (CONFIG as any).statusEffects;
+      const conditions: any[] = Array.isArray(rawStatusEffects)
+        ? rawStatusEffects
+        : Object.values(rawStatusEffects ?? {});
 
       return {
         success: true,
@@ -9895,7 +9932,24 @@ export class FoundryDataAccess {
         patch.system = systemPatch;
       }
 
-      await actor.update(patch);
+      // PF2e (CreaturePF2e#_preUpdate) clamps an incoming system.attributes.hp.value
+      // against the *currently prepared* max, so raising value and max in the same
+      // update caps value at the old max. When both are present, apply max first and
+      // value in a follow-up update.
+      const hpPatch = patch.system?.attributes?.hp;
+      if (
+        hpPatch &&
+        typeof hpPatch === 'object' &&
+        hpPatch.max !== undefined &&
+        hpPatch.value !== undefined
+      ) {
+        const deferredHpValue = hpPatch.value;
+        delete hpPatch.value;
+        await actor.update(patch);
+        await actor.update({ 'system.attributes.hp.value': deferredHpValue });
+      } else {
+        await actor.update(patch);
+      }
       updatedActors.push({ id: actor.id, name: u.name ?? actor.name });
     }
 
