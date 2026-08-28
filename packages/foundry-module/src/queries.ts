@@ -150,6 +150,9 @@ export class QueryHandlers {
     CONFIG.queries[`${modulePrefix}.addSaveFeatureToActor`] =
       this.handleAddSaveFeatureToActor.bind(this);
     CONFIG.queries[`${modulePrefix}.createNpcActor`] = this.handleCreateNpcActor.bind(this);
+
+    // Pathfinder 2e queries
+    CONFIG.queries[`${modulePrefix}.createPf2eNpcActor`] = this.handleCreatePf2eNpcActor.bind(this);
     CONFIG.queries[`${modulePrefix}.addAttackToActor`] = this.handleAddAttackToActor.bind(this);
     CONFIG.queries[`${modulePrefix}.addAuraToActor`] = this.handleAddAuraToActor.bind(this);
     CONFIG.queries[`${modulePrefix}.addPassiveFeatureToActor`] =
@@ -1818,6 +1821,30 @@ export class QueryHandlers {
     } catch (error) {
       throw new Error(
         `Failed to create NPC actor: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  private async handleCreatePf2eNpcActor(data: any): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) return { error: 'Access denied', success: false };
+      this.dataAccess.validateFoundryState();
+
+      if (!data?.name) throw new Error('name is required');
+      if (typeof data.level !== 'number') throw new Error('level is required');
+      if (!data.abilities || typeof data.abilities !== 'object')
+        throw new Error('abilities is required and must be an object of six modifiers');
+      if (typeof data.hp !== 'number' || typeof data.ac !== 'number')
+        throw new Error('hp and ac are required numbers');
+      if (!data.saves || typeof data.saves !== 'object')
+        throw new Error('saves { fortitude, reflex, will } is required');
+      if (typeof data.perception !== 'number') throw new Error('perception is required');
+
+      return await this.dataAccess.createPf2eNpcActor(data);
+    } catch (error) {
+      throw new Error(
+        `Failed to create PF2e NPC: ${error instanceof Error ? error.message : 'Unknown error'}`
       );
     }
   }

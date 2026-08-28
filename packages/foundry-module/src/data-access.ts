@@ -1836,10 +1836,10 @@ export class FoundryDataAccess {
           'immunities',
           'weaknesses',
           'resistances',
-          'perception',
           'initiative',
           'classDC',
         ]),
+        perception: src.perception ?? null,
         saves: src.saves ?? null,
         skills: src.skills ?? null,
         proficiencies: src.proficiencies ?? null,
@@ -8635,6 +8635,213 @@ export class FoundryDataAccess {
         error instanceof Error ? error.message : 'Unknown error'
       );
       throw error;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Pathfinder 2e NPC creation (pf2e-create-npc)
+  // ---------------------------------------------------------------------------
+
+  async createPf2eNpcActor(data: {
+    name: string;
+    level: number;
+    abilities: Record<string, number>;
+    hp: number;
+    ac: number;
+    saves: { fortitude: number; reflex: number; will: number };
+    perception: number;
+    size: string;
+    rarity: string;
+    traits: string[];
+    speed: number;
+    otherSpeeds: Array<{ type: string; value: number }>;
+    skills: Record<string, number>;
+    languages: string[];
+    immunities: string[];
+    weaknesses: Array<{ type: string; value?: number; exceptions?: string[] }>;
+    resistances: Array<{ type: string; value?: number; exceptions?: string[] }>;
+    strikes: Array<{
+      name: string;
+      kind: 'melee' | 'ranged';
+      bonus: number;
+      damage: string;
+      traits: string[];
+      rangeIncrement?: number;
+    }>;
+    blurb: string;
+    publicNotes: string;
+    folder?: string;
+    addToScene: boolean;
+  }): Promise<any> {
+    this.validateFoundryState();
+
+    if ((game.system as any).id !== 'pf2e') {
+      throw new Error(
+        `createPf2eNpcActor requires the Pathfinder 2e system. Current: "${(game.system as any).id}".`
+      );
+    }
+
+    const existing = game.actors?.find((a: any) => a.name === data.name && a.type === 'npc');
+    if (existing) {
+      throw new Error(
+        `An NPC named "${data.name}" already exists (id: ${existing.id}). Use a different name.`
+      );
+    }
+
+    const warnings: string[] = [];
+
+    // Abilities: PF2e NPCs store the modifier directly as { mod: N }.
+    const abilities: Record<string, { mod: number }> = {};
+    for (const key of ['str', 'dex', 'con', 'int', 'wis', 'cha']) {
+      abilities[key] = { mod: Number(data.abilities[key] ?? 0) };
+    }
+
+    // Skills: NPC skills live in system.skills as { <slug>: { base: N } }.
+    const skills: Record<string, { base: number }> = {};
+    for (const [slug, mod] of Object.entries(data.skills ?? {})) {
+      skills[slug] = { base: Number(mod) };
+    }
+
+    const iwr = (
+      list: Array<{ type: string; value?: number; exceptions?: string[] }>,
+      needsValue: boolean
+    ) =>
+      (list ?? []).map(e => {
+        const out: Record<string, any> = {
+          type: e.type,
+          exceptions: Array.isArray(e.exceptions) ? e.exceptions : [],
+        };
+        if (needsValue) {
+          out.value = typeof e.value === 'number' ? e.value : 0;
+          if (typeof e.value !== 'number') {
+            warnings.push(`${e.type}: no numeric value given, defaulted to 0`);
+          }
+        }
+        return out;
+      });
+
+    const folderId = await this.resolveFolderPath(
+      data.folder?.trim() ? data.folder.trim() : 'Foundry MCP Creatures',
+      'Actor'
+    );
+
+    const actorData: Record<string, any> = {
+      name: data.name,
+      type: 'npc',
+      folder: folderId ?? null,
+      system: {
+        abilities,
+        attributes: {
+          hp: { value: data.hp, max: data.hp, temp: 0, details: '' },
+          ac: { value: data.ac, details: '' },
+          speed: {
+            value: data.speed,
+            otherSpeeds: (data.otherSpeeds ?? []).map(s => ({ type: s.type, value: s.value })),
+            details: '',
+          },
+          immunities: iwr(
+            (data.immunities ?? []).map(t => ({ type: t })),
+            false
+          ),
+          weaknesses: iwr(data.weaknesses ?? [], true),
+          resistances: iwr(data.resistances ?? [], true),
+        },
+        saves: {
+          fortitude: { value: data.saves.fortitude, saveDetail: '' },
+          reflex: { value: data.saves.reflex, saveDetail: '' },
+          will: { value: data.saves.will, saveDetail: '' },
+        },
+        // NPC perception uses `mod` (saves use `value` — PF2e is inconsistent here).
+        perception: { mod: data.perception, details: '', senses: [], vision: true },
+        skills,
+        details: {
+          level: { value: data.level },
+          languages: { value: data.languages ?? [], details: '' },
+          blurb: data.blurb ?? '',
+          publicNotes: data.publicNotes ?? '',
+          privateNotes: '',
+          publication: { title: '', authors: '', license: 'OGL', remaster: false },
+        },
+        traits: {
+          value: data.traits ?? [],
+          rarity: data.rarity,
+          size: { value: data.size },
+        },
+        resources: {},
+      },
+    };
+
+    try {
+      const created = (await Actor.create(actorData as any)) as any;
+      if (!created) throw new Error('Actor.create returned nothing');
+
+      // Strikes: PF2e represents both melee and ranged NPC attacks as `melee`
+      // items; `range` (null vs { increment }) is what distinguishes them.
+      const strikeItems = (data.strikes ?? []).map(s => {
+        const lastSpace = s.damage.lastIndexOf(' ');
+        const dice = lastSpace > 0 ? s.damage.slice(0, lastSpace).trim() : s.damage.trim();
+        const damageType = lastSpace > 0 ? s.damage.slice(lastSpace + 1).trim() : 'untyped';
+        const rollId = (foundry.utils as any).randomID(16);
+        return {
+          name: s.name,
+          type: 'melee',
+          system: {
+            description: { value: '', gm: '' },
+            rules: [],
+            slug: null,
+            traits: { otherTags: [], value: s.traits ?? [] },
+            action: 'strike',
+            area: null,
+            damageRolls: { [rollId]: { damage: dice, damageType, category: null } },
+            bonus: { value: s.bonus },
+            attackEffects: { value: [] },
+            range: s.kind === 'ranged' ? { increment: s.rangeIncrement ?? 30, max: null } : null,
+            subjectToMAP: true,
+            material: { type: null, grade: null, effects: [] },
+            runes: { property: [] },
+          },
+        };
+      });
+      if (strikeItems.length) {
+        await created.createEmbeddedDocuments('Item', strikeItems);
+      }
+
+      this.assertActorPreparesOrThrow(created);
+
+      let tokensPlaced = 0;
+      if (data.addToScene) {
+        try {
+          const result = await this.addActorsToScene({
+            actorIds: [created.id],
+            placement: 'random',
+            hidden: false,
+          });
+          tokensPlaced = result?.tokensCreated ?? 0;
+        } catch (err) {
+          warnings.push(
+            `Actor created but could not place a token: ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+      }
+
+      this.auditLog('createPf2eNpcActor', { name: data.name, level: data.level }, 'success');
+      return {
+        success: true,
+        actor: { id: created.id, name: created.name, type: created.type },
+        strikesAdded: strikeItems.length,
+        tokensPlaced,
+        ...(warnings.length ? { warnings } : {}),
+      };
+    } catch (error) {
+      this.auditLog(
+        'createPf2eNpcActor',
+        { name: data.name },
+        'failure',
+        error instanceof Error ? error.message : 'Unknown error'
+      );
+      throw new Error(
+        `Failed to create PF2e NPC "${data.name}": ${error instanceof Error ? error.message : String(error)}`
+      );
     }
   }
 
