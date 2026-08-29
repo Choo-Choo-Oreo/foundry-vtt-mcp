@@ -3128,7 +3128,7 @@ export class FoundryDataAccess {
     const enhancedIndexEnabled = game.settings.get(this.moduleId, 'enableEnhancedCreatureIndex');
 
     if (!enhancedIndexEnabled) {
-      return this.fallbackBasicCreatureSearch(criteria, limit);
+      return this.fallbackBasicCreatureSearch(criteria, limit, 'disabled');
     }
 
     try {
@@ -3277,8 +3277,10 @@ export class FoundryDataAccess {
       };
     } catch (error) {
       console.error(`[${this.moduleId}] Enhanced creature search failed:`, error);
-      // Fallback to basic search if enhanced index fails
-      return this.fallbackBasicCreatureSearch(criteria, limit);
+      // Fallback to basic search if enhanced index fails. This reports rather
+      // than degrades when the index is mid-rebuild or the criteria can't be
+      // expressed as a name search.
+      return this.fallbackBasicCreatureSearch(criteria, limit, 'failed');
     }
   }
 
@@ -3519,15 +3521,59 @@ export class FoundryDataAccess {
   }
 
   /**
-   * Fallback to basic creature search if enhanced index fails
+   * Names of Actor compendium packs whose index Foundry hasn't finished building.
+   *
+   * `pack.indexed` is Foundry's own "has this pack been fully indexed?" flag.
+   * While packs are still indexing, creature searches return badly degraded
+   * results, so it's worth telling the caller to retry rather than handing them
+   * junk that looks authoritative.
+   */
+  private getUnindexedCreaturePacks(): string[] {
+    try {
+      const packs = [...((game as any).packs ?? [])];
+      return packs
+        .filter((p: any) => p?.documentName === 'Actor' && p?.indexed === false)
+        .map((p: any) => p.metadata?.label ?? p.collection ?? 'unknown');
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Fallback creature search, used when the enhanced index is disabled or fails.
+   *
+   * This path can only do name-substring matching, so it genuinely cannot serve
+   * criteria like "level 3" or "has spells". It used to paper over that by
+   * searching for the literal word "monster" whenever it had no usable terms,
+   * which returned creatures with "Monster" in the name and presented them as a
+   * successful filtered result. Now it refuses instead of inventing a query, and
+   * it distinguishes "index still building — retry" from "this filter is
+   * unsupported here", so callers get an actionable reason rather than garbage.
    */
   private async fallbackBasicCreatureSearch(
     criteria: any,
-    limit: number
+    limit: number,
+    reason: 'disabled' | 'failed' = 'failed'
   ): Promise<{ creatures: any[]; searchSummary: any }> {
-    console.warn(`[${this.moduleId}] Falling back to basic search due to enhanced index failure`);
+    // A rebuild in progress is the most common cause of an enhanced-index
+    // failure, and the only one the caller can fix by simply waiting.
+    const unindexed = this.getUnindexedCreaturePacks();
+    if (reason === 'failed' && unindexed.length > 0) {
+      throw new Error(
+        `Foundry is still building its compendium index (${unindexed.length} Actor pack(s) ` +
+          `not yet indexed: ${unindexed.slice(0, 5).join(', ')}${unindexed.length > 5 ? ', …' : ''}). ` +
+          `Creature search results would be incomplete and misleading right now — wait for indexing ` +
+          `to finish and retry.`
+      );
+    }
 
-    // Use a simple text-based search as fallback
+    console.warn(
+      `[${this.moduleId}] Falling back to basic creature search (reason: ${reason})`,
+      criteria
+    );
+
+    // Basic search is name-matching only; build terms from the criteria that can
+    // actually be expressed as a name.
     const searchTerms: string[] = [];
 
     if (criteria.creatureType) {
@@ -3543,7 +3589,23 @@ export class FoundryDataAccess {
       }
     }
 
-    const searchQuery = searchTerms.join(' ') || 'monster';
+    if (searchTerms.length === 0) {
+      const applied = Object.keys(criteria ?? {}).filter(
+        k => k !== 'limit' && (criteria as any)[k] !== undefined
+      );
+      throw new Error(
+        `The enhanced creature index is ${reason === 'disabled' ? 'disabled' : 'unavailable'}, and ` +
+          `the basic fallback can only match creature names — it cannot filter by ` +
+          `${applied.length > 0 ? applied.join(', ') : 'the given criteria'}. ` +
+          (reason === 'disabled'
+            ? `Enable "enableEnhancedCreatureIndex" in the module settings, or `
+            : `Retry once Foundry has finished indexing, or `) +
+          `use search-compendium with a name instead. (Previously this returned creatures ` +
+          `matching the literal word "monster", which looked like a real result.)`
+      );
+    }
+
+    const searchQuery = searchTerms.join(' ');
     const basicResults = await this.searchCompendium(searchQuery, 'Actor');
 
     return {
@@ -3556,6 +3618,10 @@ export class FoundryDataAccess {
         criteria,
         fallback: true,
         searchMethod: 'basic_fallback',
+        fallbackReason: reason,
+        warning:
+          `Degraded result: matched only the name(s) "${searchQuery}". The requested criteria ` +
+          `were NOT applied. Do not treat this as a filtered creature list.`,
       },
     };
   }
