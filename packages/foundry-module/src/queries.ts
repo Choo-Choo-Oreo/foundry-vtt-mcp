@@ -1881,9 +1881,12 @@ export class QueryHandlers {
       if (!gmCheck.allowed) return { error: 'Access denied', success: false };
       this.dataAccess.validateFoundryState();
 
-      const types = ['ancestry', 'heritage', 'background', 'class', 'deity', 'feat'];
-      if (!data?.itemType || !types.includes(data.itemType)) {
-        throw new Error(`itemType is required and must be one of: ${types.join(', ')}`);
+      // The valid itemType list lives in ONE place: PF2E_ABC_ITEM_TYPES in
+      // data-access.ts, which createPf2eAbcItem checks and reports on. A copy
+      // used to live here and silently went stale when action/effect/spell were
+      // added — only require that the field is present at all.
+      if (!data?.itemType) {
+        throw new Error('itemType is required');
       }
       if (!data.name && !data.basedOn) {
         throw new Error(
