@@ -124,6 +124,7 @@ export class QueryHandlers {
     CONFIG.queries[`${modulePrefix}.createWorldItems`] = this.handleCreateWorldItems.bind(this);
     CONFIG.queries[`${modulePrefix}.listWorldItems`] = this.handleListWorldItems.bind(this);
     CONFIG.queries[`${modulePrefix}.updateWorldItems`] = this.handleUpdateWorldItems.bind(this);
+    CONFIG.queries[`${modulePrefix}.deleteWorldItems`] = this.handleDeleteWorldItems.bind(this);
     CONFIG.queries[`${modulePrefix}.getSystemSchema`] = this.handleGetSystemSchema.bind(this);
 
     // Generic actor CRUD (any system, any type)
@@ -1688,6 +1689,27 @@ export class QueryHandlers {
     } catch (error) {
       throw new Error(
         `Failed to update world items: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  private async handleDeleteWorldItems(data: { ids: string[] }): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      this.dataAccess.validateFoundryState();
+
+      if (!Array.isArray(data?.ids) || data.ids.length === 0) {
+        throw new Error('ids array is required and must contain at least one world Item id');
+      }
+
+      return await this.dataAccess.deleteWorldItems({ ids: data.ids });
+    } catch (error) {
+      throw new Error(
+        `Failed to delete world items: ${error instanceof Error ? error.message : 'Unknown error'}`
       );
     }
   }

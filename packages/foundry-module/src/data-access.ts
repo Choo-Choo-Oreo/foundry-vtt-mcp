@@ -5017,6 +5017,78 @@ export class FoundryDataAccess {
   }
 
   /**
+   * Permanently delete one or more world-level Item documents by id.
+   *
+   * This is the only way to remove a standalone world Item — `removeActorItems`
+   * only detaches items already embedded on an actor.
+   *
+   * Every id is validated *before* anything is deleted: an unknown id fails the
+   * whole call and removes nothing, rather than silently deleting the subset it
+   * recognised. (Contrast `deleteTokens`, which reports `deletedCount: 0` on a
+   * bad id and looks like a success.)
+   */
+  async deleteWorldItems(params: { ids: string[] }): Promise<{
+    deleted: Array<{ id: string; name: string; type: string }>;
+    total: number;
+  }> {
+    this.validateFoundryState();
+
+    const { ids } = params;
+
+    if (!Array.isArray(ids) || ids.length === 0) {
+      throw new Error('ids array is required and must contain at least one world Item id');
+    }
+
+    const resolved: Array<{ id: string; name: string; type: string }> = [];
+    const missing: string[] = [];
+
+    for (const id of ids) {
+      if (typeof id !== 'string' || id.trim().length === 0) {
+        throw new Error('Every entry in "ids" must be a non-empty string');
+      }
+      const item = (game as any).items?.get(id);
+      if (!item) {
+        missing.push(id);
+        continue;
+      }
+      resolved.push({ id: item.id, name: item.name, type: item.type });
+    }
+
+    if (missing.length > 0) {
+      throw new Error(
+        `Not found in the world Items directory: ${missing.join(', ')}. ` +
+          `Nothing was deleted. Use action:"list" to get valid ids — note that items embedded ` +
+          `on an actor are not world Items and must be removed with action:"remove-from-actor".`
+      );
+    }
+
+    try {
+      await (Item as any).deleteDocuments(resolved.map(r => r.id));
+
+      // Confirm they're actually gone rather than trusting the call.
+      const survivors = resolved.filter(r => (game as any).items?.get(r.id));
+      if (survivors.length > 0) {
+        throw new Error(
+          `Foundry reported success but these items still exist: ${survivors
+            .map(s => `${s.name} (${s.id})`)
+            .join(', ')}`
+        );
+      }
+
+      this.auditLog('deleteWorldItems', { count: resolved.length }, 'success');
+      return { deleted: resolved, total: resolved.length };
+    } catch (error) {
+      this.auditLog(
+        'deleteWorldItems',
+        { count: resolved.length },
+        'failure',
+        error instanceof Error ? error.message : 'Unknown error'
+      );
+      throw error;
+    }
+  }
+
+  /**
    * Create one or more world-level Item documents (Items sidebar, not embedded on an actor).
    *
    * Uses Item.createDocuments() with no parent so items appear in the Foundry

@@ -154,6 +154,7 @@ export class CharacterTools {
           '- "create": Create world-level Items in the sidebar (not actor-attached). Good for reusable libraries. GM-only.\n' +
           '- "list": List world-level Items with optional type/folder/name filters.\n' +
           '- "update": Update existing world-level Items by ID. GM-only.\n' +
+          '- "delete": Permanently delete world-level Items by ID (pass "ids"). This is the ONLY way to remove a standalone world Item; "remove-from-actor" only detaches items already on an actor. GM-only.\n' +
           '- "add-to-actor": Create and attach Items directly to an existing actor. GM-only.\n' +
           '- "remove-from-actor": Delete Items already on an actor, identified by itemIds and/or itemNames (optionally constrained by type). GM-only.\n' +
           '- "describe": Returns system-specific enum/schema reference for all item field values. ' +
@@ -165,9 +166,24 @@ export class CharacterTools {
           properties: {
             action: {
               type: 'string',
-              enum: ['create', 'list', 'update', 'add-to-actor', 'remove-from-actor', 'describe'],
+              enum: [
+                'create',
+                'list',
+                'update',
+                'delete',
+                'add-to-actor',
+                'remove-from-actor',
+                'describe',
+              ],
               description:
-                'Operation to perform: "create" world items, "list" world items, "update" world items by id, "add-to-actor" to attach items to an actor, "remove-from-actor" to delete items from an actor, or "describe" to get system-specific enum reference (mgt2e: weapon traits, scales, armour forms, hardware systems, etc.).',
+                'Operation to perform: "create" world items, "list" world items, "update" world items by id, "delete" world items by id, "add-to-actor" to attach items to an actor, "remove-from-actor" to delete items from an actor, or "describe" to get system-specific enum reference (mgt2e: weapon traits, scales, armour forms, hardware systems, etc.).',
+            },
+            ids: {
+              type: 'array',
+              minItems: 1,
+              description:
+                'Required for "delete". IDs of world Items to permanently delete (get them from action:"list"). All ids are validated before anything is deleted — if any is unknown the whole call fails and nothing is removed.',
+              items: { type: 'string' },
             },
             items: {
               type: 'array',
@@ -682,7 +698,17 @@ export class CharacterTools {
 
   async handleManageWorldItems(args: any): Promise<any> {
     const { action } = z
-      .object({ action: z.enum(['create', 'list', 'update', 'add-to-actor', 'remove-from-actor', 'describe']) })
+      .object({
+        action: z.enum([
+          'create',
+          'list',
+          'update',
+          'delete',
+          'add-to-actor',
+          'remove-from-actor',
+          'describe',
+        ]),
+      })
       .parse(args);
 
     switch (action) {
@@ -692,12 +718,39 @@ export class CharacterTools {
         return this.handleListWorldItems(args);
       case 'update':
         return this.handleUpdateWorldItems(args);
+      case 'delete':
+        return this.handleDeleteWorldItems(args);
       case 'add-to-actor':
         return this.handleAddActorItems(args);
       case 'remove-from-actor':
         return this.handleRemoveActorItems(args);
       case 'describe':
         return this.handleDescribeSystemSchema();
+    }
+  }
+
+  async handleDeleteWorldItems(args: any): Promise<any> {
+    const schema = z.object({
+      ids: z.array(z.string().min(1)).min(1, 'Provide at least one world Item id to delete'),
+    });
+
+    const { ids } = schema.parse(args);
+
+    this.logger.info('Deleting world items', { count: ids.length });
+
+    try {
+      const result = await this.foundryClient.query('foundry-mcp-bridge.deleteWorldItems', { ids });
+
+      this.logger.debug('Successfully deleted world items', {
+        deleted: result.deleted?.length ?? 0,
+      });
+
+      return result;
+    } catch (error) {
+      this.logger.error('Failed to delete world items', error);
+      throw new Error(
+        `Failed to delete world item(s): ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
     }
   }
 
