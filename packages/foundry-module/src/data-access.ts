@@ -8846,6 +8846,197 @@ export class FoundryDataAccess {
   }
 
   // ---------------------------------------------------------------------------
+  // PF2e homebrew ABC + feat items (pf2e-create-abc-item)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Resolve a `basedOn` string to a cloned compendium item's source data.
+   * Accepts a full "Compendium.…" UUID or a "<packId>.<ItemName-or-id>" ref
+   * (the pack id itself may contain dots — we match the longest pack prefix).
+   */
+  private async resolvePf2eBasedOn(
+    basedOn: string
+  ): Promise<{ type: string; name: string; fullData: any }> {
+    const raw = (basedOn ?? '').trim();
+    if (!raw) throw new Error('basedOn was empty');
+
+    if (raw.startsWith('Compendium.')) {
+      const doc: any = await fromUuid(raw);
+      if (!doc) throw new Error(`basedOn UUID not found: ${raw}`);
+      return {
+        type: doc.type,
+        name: doc.name,
+        fullData: this.sanitizeData(doc.toObject()),
+      };
+    }
+
+    let bestPack: any = null;
+    let remainder = '';
+    for (const p of (game as any).packs) {
+      if (p.documentName !== 'Item') continue;
+      const id: string = p.metadata.id;
+      if (raw === id) continue; // need a name/id after the pack
+      if (raw.startsWith(`${id}.`)) {
+        if (!bestPack || id.length > (bestPack.metadata.id as string).length) {
+          bestPack = p;
+          remainder = raw.slice(id.length + 1);
+        }
+      }
+    }
+    if (!bestPack) {
+      throw new Error(
+        `Could not find a compendium pack in basedOn "${raw}". Use "<packId>.<ItemName>" ` +
+          `(e.g. "pf2e.ancestries.Goblin") or a full "Compendium.…" UUID.`
+      );
+    }
+    if (!bestPack.indexed) await bestPack.getIndex();
+    const entry: any =
+      bestPack.index.get(remainder) ??
+      bestPack.index.find((e: any) => (e.name ?? '').toLowerCase() === remainder.toLowerCase());
+    if (!entry) {
+      throw new Error(`"${remainder}" not found in compendium "${bestPack.metadata.id}".`);
+    }
+    const full = await this.getCompendiumDocumentFull(bestPack.metadata.id, entry._id);
+    return { type: full.type, name: full.name, fullData: full.fullData };
+  }
+
+  async createPf2eAbcItem(data: {
+    itemType: 'ancestry' | 'heritage' | 'background' | 'class' | 'deity' | 'feat';
+    name?: string;
+    basedOn?: string;
+    targetCharacter?: string;
+    description?: string;
+    rarity?: string;
+    traits?: string[];
+    folder?: string;
+    overrides?: Record<string, any>;
+    [k: string]: any;
+  }): Promise<any> {
+    this.validateFoundryState();
+
+    if ((game.system as any).id !== 'pf2e') {
+      throw new Error(
+        `createPf2eAbcItem requires the Pathfinder 2e system. Current: "${(game.system as any).id}".`
+      );
+    }
+
+    const type = data.itemType;
+    if (!PF2E_ABC_ITEM_TYPES.has(type)) {
+      throw new Error(`itemType must be one of: ${[...PF2E_ABC_ITEM_TYPES].join(', ')}`);
+    }
+
+    const warnings: string[] = [];
+
+    // 1. Base source — clone a compendium item or build from a template.
+    let source: Record<string, any>;
+    if (data.basedOn) {
+      const cloned = await this.resolvePf2eBasedOn(data.basedOn);
+      if (cloned.type !== type) {
+        throw new Error(
+          `basedOn "${data.basedOn}" is a "${cloned.type}", but itemType is "${type}".`
+        );
+      }
+      source = foundry.utils.deepClone(cloned.fullData);
+      delete source._id;
+      delete source.folder;
+      delete source.sort;
+      delete source.ownership;
+      delete source._stats;
+      if (data.name) source.name = data.name;
+      else source.name = `${cloned.name} (Homebrew)`;
+    } else {
+      source = {
+        name: data.name,
+        type,
+        img: PF2E_ITEM_DEFAULT_IMG[type],
+        system: foundry.utils.deepClone(PF2E_ITEM_TEMPLATES[type]),
+      };
+    }
+    source.type = type;
+    if (!source.system || typeof source.system !== 'object') source.system = {};
+
+    // 2. Friendly params -> system data.
+    applyPf2eAbcParams(type, source.system, data, warnings);
+
+    // 3. Caller overrides, deep-merged last.
+    if (data.overrides && typeof data.overrides === 'object') {
+      source.system = foundry.utils.mergeObject(source.system, data.overrides, { inplace: false });
+    }
+
+    // 4. Shared emitter — guarantee the common template fields exist.
+    finalizePf2eItemSource(source, data);
+
+    // 5. Create the standalone world item.
+    const folderId = await this.resolveFolderPath(
+      data.folder?.trim() ? data.folder.trim() : 'Foundry MCP Items',
+      'Item'
+    );
+    let item: any;
+    try {
+      source.folder = folderId ?? null;
+      const results = (await Item.createDocuments([source as any])) as any[];
+      item = results?.[0];
+      if (!item) throw new Error('Item.createDocuments returned nothing');
+    } catch (error) {
+      this.auditLog(
+        'createPf2eAbcItem',
+        { name: source.name, type },
+        'failure',
+        error instanceof Error ? error.message : String(error)
+      );
+      throw new Error(
+        `Failed to create PF2e ${type} "${source.name}": ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+
+    // 6. Optionally attach to a character.
+    let attachedTo: string | null = null;
+    if (data.targetCharacter?.trim()) {
+      const actor = this.findActorByIdentifier(data.targetCharacter.trim());
+      if (!actor) {
+        warnings.push(
+          `Item created, but no actor matched "${data.targetCharacter}" — not attached.`
+        );
+      } else if (actor.type !== 'character') {
+        warnings.push(
+          `Item created, but "${actor.name}" is a ${actor.type}, not a character — not attached. ` +
+            `Use manage-world-items add-to-actor for NPCs.`
+        );
+      } else {
+        let addedIds: string[] = [];
+        try {
+          const embedded = (await actor.createEmbeddedDocuments('Item', [item.toObject()])) || [];
+          addedIds = embedded.map((d: any) => d.id).filter(Boolean);
+          this.assertActorPreparesOrThrow(actor);
+          attachedTo = actor.name;
+        } catch (error) {
+          if (addedIds.length) {
+            await actor.deleteEmbeddedDocuments('Item', addedIds).catch(() => undefined);
+            try {
+              this.assertActorPreparesOrThrow(actor);
+            } catch {
+              /* actor without the bad item should prepare fine again */
+            }
+          }
+          warnings.push(
+            `Item "${item.name}" was saved as a world item but could not attach to "${actor.name}": ` +
+              `${error instanceof Error ? error.message : String(error)}. On PF2e, attach an ancestry + ` +
+              `class first, then heritage/feats.`
+          );
+        }
+      }
+    }
+
+    this.auditLog('createPf2eAbcItem', { name: item.name, type, attachedTo }, 'success');
+    return {
+      success: true,
+      item: { id: item.id, name: item.name, type: item.type, uuid: item.uuid },
+      attachedTo,
+      ...(warnings.length ? { warnings } : {}),
+    };
+  }
+
+  // ---------------------------------------------------------------------------
   // Add weapon attack to an existing actor (dnd5e-add-attack-feature)
   // ---------------------------------------------------------------------------
 
@@ -10865,3 +11056,370 @@ const WARLOCK_PACT_TABLE: Array<{ max: number; level: number }> = [
   { max: 4, level: 5 }, // level 19
   { max: 4, level: 5 }, // level 20
 ];
+
+// =============================================================================
+// PF2e ABC item helpers — module-level, used exclusively by createPf2eAbcItem
+// =============================================================================
+
+const PF2E_ABC_ITEM_TYPES = new Set([
+  'ancestry',
+  'heritage',
+  'background',
+  'class',
+  'deity',
+  'feat',
+]);
+
+/** PF2e's own default-icon art per item type. A missing file just renders blank. */
+const PF2E_ITEM_DEFAULT_IMG: Record<string, string> = {
+  ancestry: 'systems/pf2e/icons/default-icons/ancestry.svg',
+  heritage: 'systems/pf2e/icons/default-icons/heritage.svg',
+  background: 'systems/pf2e/icons/default-icons/background.svg',
+  class: 'systems/pf2e/icons/default-icons/class.svg',
+  deity: 'systems/pf2e/icons/default-icons/deity.svg',
+  feat: 'systems/pf2e/icons/default-icons/feat.svg',
+};
+
+/** Feat categories the character sheet slots by class-defined level (vs. unslotted bonus/feature). */
+const SLOTTED_FEAT_CATEGORIES = new Set(['ancestry', 'class', 'skill', 'general']);
+
+/** Item types whose `system.traits` schema has a `value` array. */
+const PF2E_TYPES_WITH_TRAIT_VALUE = new Set(['ancestry', 'background', 'heritage', 'feat']);
+/** Item types whose `system.traits` schema has a `rarity` field. */
+const PF2E_TYPES_WITH_TRAIT_RARITY = new Set([
+  'ancestry',
+  'background',
+  'heritage',
+  'class',
+  'feat',
+]);
+
+/**
+ * Minimal `system` payloads for a scratch build (no `basedOn`). Only the
+ * type-specific fields that PF2e prep iterates over need to be here — the
+ * common template (`description`/`publication`/`rules`/`slug`/`traits`/
+ * `_migration`) is added afterwards by `finalizePf2eItemSource`.
+ */
+const PF2E_ITEM_TEMPLATES: Record<string, Record<string, any>> = {
+  ancestry: {
+    hp: 8,
+    size: 'med',
+    reach: 5,
+    speed: 25,
+    boosts: { '0': { value: [] }, '1': { value: [] } },
+    flaws: {},
+    languages: { value: ['common'], custom: '' },
+    additionalLanguages: { count: 0, value: [], custom: '' },
+    vision: 'normal',
+    items: {},
+  },
+  heritage: {
+    ancestry: null,
+  },
+  background: {
+    boosts: { '0': { value: [] }, '1': { value: [] } },
+    trainedSkills: { value: [], lore: [] },
+    items: {},
+  },
+  class: {
+    keyAbility: { value: [], selected: null },
+    hp: 8,
+    perception: 0,
+    savingThrows: { fortitude: 1, reflex: 1, will: 1 },
+    attacks: {
+      simple: 0,
+      martial: 0,
+      advanced: 0,
+      unarmed: 0,
+      other: { name: '', rank: 0 },
+    },
+    defenses: { unarmored: 0, light: 0, medium: 0, heavy: 0 },
+    spellcasting: 0,
+    trainedSkills: { value: [], additional: 0 },
+    ancestryFeatLevels: { value: [1, 5, 9, 13, 17] },
+    classFeatLevels: { value: [1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20] },
+    generalFeatLevels: { value: [3, 7, 11, 15, 19] },
+    skillFeatLevels: { value: [2, 4, 6, 8, 10, 12, 14, 16, 18, 20] },
+    skillIncreaseLevels: { value: [3, 5, 7, 9, 11, 13, 15, 17, 19] },
+    items: {},
+  },
+  deity: {
+    category: 'deity',
+    sanctification: { modal: 'can', what: [] },
+    domains: { primary: [], alternate: [] },
+    font: [],
+    attribute: [],
+    skill: [],
+    weapons: [],
+    spells: {},
+  },
+  feat: {
+    level: { value: 1 },
+    category: 'bonus',
+    onlyLevel1: false,
+    maxTakable: 1,
+    actionType: { value: 'passive' },
+    actions: { value: null },
+    prerequisites: { value: [] },
+    location: null,
+    subfeatures: {
+      keyOptions: [],
+      languages: { slots: 0, granted: [] },
+      proficiencies: {},
+      senses: {},
+      suppressedFeatures: [],
+    },
+  },
+};
+
+/** The CONFIG.PF2E trait dictionary an item type's `system.traits.value` is validated against. */
+function pf2eKnownTraitsFor(type: string): Record<string, string> | undefined {
+  const cfg: any = (CONFIG as any).PF2E ?? {};
+  switch (type) {
+    case 'ancestry':
+    case 'heritage':
+    case 'background':
+      return cfg.creatureTraits;
+    case 'feat':
+      return cfg.featTraits;
+    case 'class':
+      return cfg.classTraits;
+    default:
+      return cfg.actionTraits;
+  }
+}
+
+/** Resolve a world Item of type "ancestry" by id, exact name, or slug (case-insensitive). */
+function findWorldAncestryItem(ref: string): any {
+  const needle = (ref ?? '').trim();
+  if (!needle) return undefined;
+  const bySlug = slugify(needle);
+  return Array.from((game as any).items ?? []).find(
+    (i: any) =>
+      i.type === 'ancestry' &&
+      (i.id === needle || i.name?.toLowerCase() === needle.toLowerCase() || i.system?.slug === bySlug)
+  );
+}
+
+/** Turn `["str","dex"]` / `[]` / `""` rows into PF2e's `{ "0": { value: [...] } }` record. */
+function pf2eBoostRows(rows: any): Record<string, { value: string[] }> {
+  const out: Record<string, { value: string[] }> = {};
+  (Array.isArray(rows) ? rows : []).forEach((row: any, i: number) => {
+    out[String(i)] = { value: Array.isArray(row) ? row : row ? [String(row)] : [] };
+  });
+  return out;
+}
+
+/** Coerce a partial rank map to a full one (missing keys -> 0) so PF2e prep never hits NaN. */
+function pf2eRanks(obj: any, keys: string[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const k of keys) out[k] = typeof obj?.[k] === 'number' ? obj[k] : 0;
+  return out;
+}
+
+/** Map the tool's friendly per-type params onto `system` in place. */
+function applyPf2eAbcParams(
+  type: string,
+  system: Record<string, any>,
+  data: Record<string, any>,
+  _warnings: string[]
+): void {
+  switch (type) {
+    case 'ancestry': {
+      if (typeof data.hp === 'number') system.hp = data.hp;
+      if (typeof data.size === 'string') system.size = data.size;
+      if (typeof data.speed === 'number') system.speed = data.speed;
+      if (data.boosts !== undefined) system.boosts = pf2eBoostRows(data.boosts);
+      if (data.flaws !== undefined) system.flaws = pf2eBoostRows(data.flaws);
+      if (Array.isArray(data.languages)) system.languages = { value: data.languages, custom: '' };
+      if (typeof data.additionalLanguages === 'number') {
+        system.additionalLanguages = { count: data.additionalLanguages, value: [], custom: '' };
+      }
+      if (typeof data.vision === 'string') system.vision = data.vision;
+      break;
+    }
+    case 'heritage': {
+      if (data.ancestryName || data.ancestrySlug || data.ancestryUuid) {
+        let uuid = typeof data.ancestryUuid === 'string' ? data.ancestryUuid.trim() : '';
+        let name = typeof data.ancestryName === 'string' ? data.ancestryName : '';
+        let slug = typeof data.ancestrySlug === 'string' ? data.ancestrySlug : '';
+        if (!uuid) {
+          // PF2e's ancestry link is a real UUID — an empty string fails schema
+          // validation and Item.createDocuments silently drops the document
+          // (no throw), so this must resolve to a real UUID or fail loudly.
+          const found = findWorldAncestryItem(name || slug);
+          if (!found) {
+            throw new Error(
+              `heritage ancestry link: no world ancestry item matches "${name || slug}". ` +
+                `Pass "ancestryUuid" (the ancestry item's uuid, e.g. from its pf2e-create-abc-item ` +
+                `result) explicitly, or the exact name/slug of an ancestry item that already exists.`
+            );
+          }
+          uuid = found.uuid;
+          if (!name) name = found.name;
+          if (!slug) slug = found.system?.slug ?? slugify(found.name);
+        }
+        system.ancestry = { name: name || slug, slug: slug || (name ? slugify(name) : ''), uuid };
+      }
+      break;
+    }
+    case 'background': {
+      if (data.boosts !== undefined) system.boosts = pf2eBoostRows(data.boosts);
+      if (Array.isArray(data.trainedSkills) || Array.isArray(data.trainedLore)) {
+        system.trainedSkills = {
+          value: Array.isArray(data.trainedSkills) ? data.trainedSkills : [],
+          lore: Array.isArray(data.trainedLore) ? data.trainedLore : [],
+        };
+      }
+      break;
+    }
+    case 'class': {
+      if (Array.isArray(data.keyAbility)) {
+        system.keyAbility = {
+          value: data.keyAbility,
+          selected: data.keyAbility.length === 1 ? data.keyAbility[0] : null,
+        };
+      }
+      if (typeof data.hp === 'number') system.hp = data.hp;
+      if (typeof data.perception === 'number') system.perception = data.perception;
+      if (data.savingThrows) {
+        system.savingThrows = pf2eRanks(data.savingThrows, ['fortitude', 'reflex', 'will']);
+      }
+      if (data.attacks) {
+        system.attacks = {
+          ...pf2eRanks(data.attacks, ['simple', 'martial', 'advanced', 'unarmed']),
+          other: {
+            name: data.attacks.other?.name ?? '',
+            rank: typeof data.attacks.other?.rank === 'number' ? data.attacks.other.rank : 0,
+          },
+        };
+      }
+      if (data.defenses) {
+        system.defenses = pf2eRanks(data.defenses, ['unarmored', 'light', 'medium', 'heavy']);
+      }
+      if (typeof data.spellcasting === 'number') system.spellcasting = data.spellcasting;
+      if (Array.isArray(data.trainedSkills)) {
+        system.trainedSkills = { value: data.trainedSkills, additional: 0 };
+      }
+      break;
+    }
+    case 'deity': {
+      if (typeof data.category === 'string') system.category = data.category;
+      if (data.sanctification) {
+        system.sanctification = {
+          modal: data.sanctification.modal ?? 'can',
+          what: Array.isArray(data.sanctification.what) ? data.sanctification.what : [],
+        };
+      }
+      if (data.domains) {
+        system.domains = {
+          primary: Array.isArray(data.domains.primary) ? data.domains.primary : [],
+          alternate: Array.isArray(data.domains.alternate) ? data.domains.alternate : [],
+        };
+      }
+      if (Array.isArray(data.font)) system.font = data.font;
+      const attr = data.attribute ?? data.divineAbility;
+      if (Array.isArray(attr)) system.attribute = attr;
+      if (Array.isArray(data.skill)) system.skill = data.skill;
+      if (Array.isArray(data.weapons)) system.weapons = data.weapons;
+      break;
+    }
+    case 'feat': {
+      if (typeof data.level === 'number') system.level = { value: data.level, taken: data.level };
+      if (typeof data.category === 'string') system.category = data.category;
+      if (typeof data.actionType === 'string') system.actionType = { value: data.actionType };
+      if (data.actions === null || typeof data.actions === 'number') {
+        system.actions = { value: data.actions };
+      }
+      if (Array.isArray(data.prerequisites)) {
+        system.prerequisites = {
+          value: data.prerequisites.map((p: any) => ({ value: String(p) })),
+        };
+      }
+      if (typeof data.maxTakable === 'number') system.maxTakable = data.maxTakable;
+      if (typeof data.onlyLevel1 === 'boolean') system.onlyLevel1 = data.onlyLevel1;
+      // The character sheet only slots an ancestry/class/skill/general feat into
+      // its class-defined level slot when system.location exactly matches
+      // "<category>-<level>" (what the game's own feat picker writes via
+      // FeatGroup#insertFeat). Without it, FeatGroup#assignFeat always falls
+      // through to Bonus Feats regardless of category — every homebrew feat
+      // landed there silently.
+      if (
+        SLOTTED_FEAT_CATEGORIES.has(system.category) &&
+        typeof system.level?.value === 'number'
+      ) {
+        system.location = `${system.category}-${system.level.value}`;
+      }
+      break;
+    }
+  }
+}
+
+/**
+ * Guarantee the PF2e Item common-template fields exist on `source.system`,
+ * whatever path built it. This is the fix for the "heritage `reading 'value'`"
+ * crash — `ItemPF2e._preCreate` reads `traits.value` and `rules` off raw
+ * `_source` without guarding.
+ */
+function finalizePf2eItemSource(source: Record<string, any>, data: Record<string, any>): void {
+  const type: string = source.type;
+  const sys: Record<string, any> = source.system ?? (source.system = {});
+
+  const desc = sys.description && typeof sys.description === 'object' ? sys.description : {};
+  sys.description = {
+    value: typeof data.description === 'string' ? data.description : (desc.value ?? ''),
+    gm: typeof desc.gm === 'string' ? desc.gm : '',
+  };
+
+  const pub = sys.publication && typeof sys.publication === 'object' ? sys.publication : {};
+  sys.publication = {
+    title: typeof pub.title === 'string' ? pub.title : '',
+    authors: typeof pub.authors === 'string' ? pub.authors : '',
+    license: typeof pub.license === 'string' ? pub.license : 'OGL',
+    remaster: typeof pub.remaster === 'boolean' ? pub.remaster : false,
+  };
+
+  if (!Array.isArray(sys.rules)) sys.rules = [];
+  if (sys.slug === undefined) sys.slug = null;
+
+  const t = sys.traits && typeof sys.traits === 'object' ? sys.traits : {};
+  const traits: Record<string, any> = {
+    otherTags: Array.isArray(t.otherTags) ? t.otherTags : [],
+  };
+  if (PF2E_TYPES_WITH_TRAIT_VALUE.has(type)) {
+    const given = Array.isArray(data.traits) ? data.traits : Array.isArray(t.value) ? t.value : [];
+    // system.traits.value is validated against a per-type trait vocabulary
+    // (CONFIG.PF2E.creatureTraits / featTraits / classTraits / ...) and PF2e
+    // silently drops anything not in that list during data prep — no error,
+    // no warning. A homebrew setting's own tags (e.g. a custom ancestry trait)
+    // would otherwise vanish without a trace. Split known-vs-unknown here so
+    // unrecognized tags land in otherTags instead of being lost outright.
+    const known = pf2eKnownTraitsFor(type);
+    const accepted: string[] = [];
+    const overflow: string[] = [];
+    for (const tag of given) {
+      if (typeof tag !== 'string' || !tag) continue;
+      (known && tag in known ? accepted : overflow).push(tag);
+    }
+    traits.value = accepted;
+    if (overflow.length) {
+      const seen = new Set(traits.otherTags);
+      for (const tag of overflow) {
+        if (!seen.has(tag)) {
+          traits.otherTags.push(tag);
+          seen.add(tag);
+        }
+      }
+    }
+  } else if (Array.isArray(t.value)) {
+    traits.value = t.value;
+  }
+  if (PF2E_TYPES_WITH_TRAIT_RARITY.has(type)) {
+    traits.rarity = typeof data.rarity === 'string' ? data.rarity : (t.rarity ?? 'common');
+  } else if (typeof t.rarity === 'string') {
+    traits.rarity = t.rarity;
+  }
+  sys.traits = traits;
+
+  sys._migration = { version: 0.959, previous: null };
+}

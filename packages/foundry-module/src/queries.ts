@@ -153,6 +153,7 @@ export class QueryHandlers {
 
     // Pathfinder 2e queries
     CONFIG.queries[`${modulePrefix}.createPf2eNpcActor`] = this.handleCreatePf2eNpcActor.bind(this);
+    CONFIG.queries[`${modulePrefix}.createPf2eAbcItem`] = this.handleCreatePf2eAbcItem.bind(this);
     CONFIG.queries[`${modulePrefix}.addAttackToActor`] = this.handleAddAttackToActor.bind(this);
     CONFIG.queries[`${modulePrefix}.addAuraToActor`] = this.handleAddAuraToActor.bind(this);
     CONFIG.queries[`${modulePrefix}.addPassiveFeatureToActor`] =
@@ -1845,6 +1846,30 @@ export class QueryHandlers {
     } catch (error) {
       throw new Error(
         `Failed to create PF2e NPC: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  private async handleCreatePf2eAbcItem(data: any): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) return { error: 'Access denied', success: false };
+      this.dataAccess.validateFoundryState();
+
+      const types = ['ancestry', 'heritage', 'background', 'class', 'deity', 'feat'];
+      if (!data?.itemType || !types.includes(data.itemType)) {
+        throw new Error(`itemType is required and must be one of: ${types.join(', ')}`);
+      }
+      if (!data.name && !data.basedOn) {
+        throw new Error(
+          'Provide "name" (build from template) or "basedOn" (clone from compendium)'
+        );
+      }
+
+      return await this.dataAccess.createPf2eAbcItem(data);
+    } catch (error) {
+      throw new Error(
+        `Failed to create PF2e ABC item: ${error instanceof Error ? error.message : 'Unknown error'}`
       );
     }
   }
