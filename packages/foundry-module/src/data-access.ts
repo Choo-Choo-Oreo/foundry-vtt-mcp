@@ -7266,6 +7266,19 @@ export class FoundryDataAccess {
         .filter(s => s.length > 0);
       if (segments.length === 0) return null;
 
+      // Foundry caps folder nesting at CONST.FOLDER_MAX_DEPTH (4 since v11).
+      // Exceeding it makes Folder.create reject, which used to surface as the
+      // content being created unfiled with no warning at all. Fail loudly and
+      // up front instead — the cap itself is a core engine limit we can't lift.
+      const maxDepth = Number((globalThis as any).CONST?.FOLDER_MAX_DEPTH ?? 4);
+      if (Number.isFinite(maxDepth) && segments.length > maxDepth) {
+        throw folderPathError(
+          `Folder path "${raw}" is ${segments.length} levels deep, but Foundry allows at most ` +
+            `${maxDepth} (CONST.FOLDER_MAX_DEPTH). Shorten the path to ${maxDepth} levels or fewer — ` +
+            `this is a core Foundry limit, not a bridge restriction.`
+        );
+      }
+
       const color = type === 'Actor' ? '#4a90e2' : type === 'JournalEntry' ? '#f39c12' : undefined;
 
       let parentId: string | null = null;
@@ -7299,11 +7312,22 @@ export class FoundryDataAccess {
 
         parentId = created?.id ?? null;
         leafId = created?.id ?? null;
-        if (!leafId) return null; // creation failed mid-path
+        if (!leafId) {
+          // Foundry rejected the create and returned nothing. Previously this
+          // returned null and the caller silently filed the content nowhere.
+          throw folderPathError(
+            `Foundry refused to create the folder "${name}" while resolving "${raw}" ` +
+              `(segment ${segments.indexOf(name) + 1} of ${segments.length}). Nothing was filed ` +
+              `into a folder. This usually means the nesting depth limit was hit.`
+          );
+        }
       }
 
       return leafId;
     } catch (error) {
+      // Depth/creation failures are real errors the caller must see — silently
+      // filing content at the root is what made these bugs so hard to spot.
+      if (isFolderPathError(error)) throw error;
       console.warn(`[${this.moduleId}] Failed to resolve folder path "${pathOrName}":`, error);
       // Return null so content is created without a folder rather than failing outright
       return null;
@@ -10831,6 +10855,31 @@ export class FoundryDataAccess {
 // =============================================================================
 // Shared dnd5e helpers
 // =============================================================================
+
+// =============================================================================
+// Folder path errors
+// =============================================================================
+
+/**
+ * Marker for folder-path failures that must reach the caller.
+ *
+ * `resolveFolderPath` deliberately swallows most problems and returns null so
+ * content still gets created (just unfiled). That fallback is wrong for depth
+ * limits and outright creation refusals: the content lands at the root with no
+ * warning, which is exactly the silent-failure pattern this bridge keeps hitting.
+ * Errors tagged here are re-thrown instead of being downgraded to null.
+ */
+const FOLDER_PATH_ERROR = Symbol.for('foundry-mcp-bridge.folderPathError');
+
+function folderPathError(message: string): Error {
+  const err = new Error(message);
+  (err as any)[FOLDER_PATH_ERROR] = true;
+  return err;
+}
+
+function isFolderPathError(error: unknown): boolean {
+  return !!error && typeof error === 'object' && (error as any)[FOLDER_PATH_ERROR] === true;
+}
 
 function slugify(name: string, fallback = 'feature'): string {
   return (
