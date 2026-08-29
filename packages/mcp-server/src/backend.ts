@@ -25,6 +25,8 @@ import { SceneTools } from './tools/scene.js';
 import { ActorCreationTools } from './tools/actor-creation.js';
 import { ActorManagementTools } from './tools/actor-management.js';
 import { FolderManagementTools } from './tools/folder-management.js';
+import { JournalManagementTools } from './tools/journal-management.js';
+import { ChatTools } from './tools/chat.js';
 
 import { QuestCreationTools } from './tools/quest-creation.js';
 
@@ -1198,6 +1200,8 @@ async function startBackend(): Promise<void> {
   const actorCreationTools = new ActorCreationTools({ foundryClient, logger });
   const actorManagementTools = new ActorManagementTools({ foundryClient, logger, systemRegistry });
   const folderManagementTools = new FolderManagementTools({ foundryClient, logger });
+  const journalManagementTools = new JournalManagementTools({ foundryClient, logger });
+  const chatTools = new ChatTools({ foundryClient, logger });
 
   const dsa5CharacterCreator = new DSA5CharacterCreator({ foundryClient, logger });
 
@@ -1429,6 +1433,8 @@ async function startBackend(): Promise<void> {
     ...actorCreationTools.getToolDefinitions(),
     ...actorManagementTools.getToolDefinitions(),
     ...folderManagementTools.getToolDefinitions(),
+    ...journalManagementTools.getToolDefinitions(),
+    ...chatTools.getToolDefinitions(),
 
     ...dsa5CharacterCreator.getToolDefinitions(),
 
@@ -1619,6 +1625,25 @@ async function startBackend(): Promise<void> {
 
                 case 'manage-folders':
                   result = await folderManagementTools.handleManageFolders(args);
+
+                  break;
+
+                // Journal management (delete journals / journal pages)
+
+                case 'manage-journals':
+                  result = await journalManagementTools.handleManageJournals(args);
+
+                  break;
+
+                // Chat & dice
+
+                case 'send-chat-message':
+                  result = await chatTools.handleSendChatMessage(args);
+
+                  break;
+
+                case 'roll-dice':
+                  result = await chatTools.handleRollDice(args);
 
                   break;
 

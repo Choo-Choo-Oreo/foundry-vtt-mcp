@@ -136,6 +136,9 @@ export class QueryHandlers {
 
     // Folder management (list / delete / rename / move — any document type)
     CONFIG.queries[`${modulePrefix}.manageFolders`] = this.handleManageFolders.bind(this);
+    CONFIG.queries[`${modulePrefix}.manageJournals`] = this.handleManageJournals.bind(this);
+    CONFIG.queries[`${modulePrefix}.sendChatMessage`] = this.handleSendChatMessage.bind(this);
+    CONFIG.queries[`${modulePrefix}.rollDice`] = this.handleRollDice.bind(this);
 
     // Phase 7: Token manipulation queries
     CONFIG.queries[`${modulePrefix}.move-token`] = this.handleMoveToken.bind(this);
@@ -2189,5 +2192,74 @@ export class QueryHandlers {
     this.dataAccess.validateFoundryState();
     if (!data?.action) throw new Error('action is required (list | delete | rename | move)');
     return this.dataAccess.manageFolders(data);
+  }
+
+  private async handleManageJournals(data: {
+    action: 'delete' | 'delete-page';
+    ids?: string[];
+    journalId?: string;
+    pageIds?: string[];
+  }): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      this.dataAccess.validateFoundryState();
+
+      if (!data?.action) throw new Error('action is required (delete | delete-page)');
+
+      return await this.dataAccess.manageJournals(data);
+    } catch (error) {
+      throw new Error(
+        `Failed to manage journals: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  private async handleSendChatMessage(data: {
+    content: string;
+    speakerActor?: string;
+    whisperTo?: string[];
+    flavor?: string;
+    rollMode?: string;
+  }): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      this.dataAccess.validateFoundryState();
+
+      return await this.dataAccess.sendChatMessage(data);
+    } catch (error) {
+      throw new Error(
+        `Failed to send chat message: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  private async handleRollDice(data: {
+    formula: string;
+    flavor?: string;
+    speakerActor?: string;
+    rollMode?: string;
+  }): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      this.dataAccess.validateFoundryState();
+
+      return await this.dataAccess.rollDice(data);
+    } catch (error) {
+      throw new Error(
+        `Failed to roll dice: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
   }
 }

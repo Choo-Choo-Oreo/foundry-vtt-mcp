@@ -4265,6 +4265,149 @@ export class FoundryDataAccess {
   }
 
   /**
+   * Delete whole JournalEntry documents, or individual pages inside one.
+   *
+   * Both were previously impossible via any tool, which mattered most for
+   * `createQuestJournal`: it always injects an "Adventure Hook / Quest
+   * Objectives" boilerplate page that nothing could subsequently remove.
+   *
+   * As with deleteWorldItems, every id is validated before anything is deleted
+   * so a bad id fails the whole call rather than silently deleting the subset
+   * that happened to resolve.
+   */
+  async manageJournals(params: {
+    action: 'delete' | 'delete-page';
+    ids?: string[];
+    journalId?: string;
+    pageIds?: string[];
+  }): Promise<{
+    action: string;
+    deleted: Array<{ id: string; name: string }>;
+    total: number;
+    journal?: { id: string; name: string; remainingPages: number };
+  }> {
+    this.validateFoundryState();
+
+    const { action } = params;
+
+    if (action === 'delete') {
+      const ids = params.ids ?? [];
+      if (!Array.isArray(ids) || ids.length === 0) {
+        throw new Error('action "delete" requires an "ids" array of JournalEntry ids');
+      }
+
+      const resolved: Array<{ id: string; name: string }> = [];
+      const missing: string[] = [];
+      for (const id of ids) {
+        const journal = (game as any).journal?.get(id);
+        if (!journal) {
+          missing.push(id);
+          continue;
+        }
+        resolved.push({ id: journal.id, name: journal.name });
+      }
+      if (missing.length > 0) {
+        throw new Error(
+          `Journal(s) not found: ${missing.join(', ')}. Nothing was deleted. ` +
+            `Use list-journals to get valid ids.`
+        );
+      }
+
+      try {
+        await (JournalEntry as any).deleteDocuments(resolved.map(r => r.id));
+        const survivors = resolved.filter(r => (game as any).journal?.get(r.id));
+        if (survivors.length > 0) {
+          throw new Error(
+            `Foundry reported success but these journals still exist: ${survivors
+              .map(s => `${s.name} (${s.id})`)
+              .join(', ')}`
+          );
+        }
+        this.auditLog('manageJournals.delete', { count: resolved.length }, 'success');
+        return { action, deleted: resolved, total: resolved.length };
+      } catch (error) {
+        this.auditLog(
+          'manageJournals.delete',
+          { count: resolved.length },
+          'failure',
+          error instanceof Error ? error.message : 'Unknown error'
+        );
+        throw error;
+      }
+    }
+
+    // ── delete-page ──────────────────────────────────────────────────────────
+    const journalRef = (params.journalId ?? '').trim();
+    if (!journalRef) {
+      throw new Error('action "delete-page" requires "journalId" (the journal containing the page)');
+    }
+    const pageIds = params.pageIds ?? [];
+    if (!Array.isArray(pageIds) || pageIds.length === 0) {
+      throw new Error('action "delete-page" requires a "pageIds" array');
+    }
+
+    const journal =
+      (game as any).journal?.get(journalRef) ??
+      (game as any).journal?.find?.((j: any) => j.name?.toLowerCase() === journalRef.toLowerCase());
+    if (!journal) throw new Error(`Journal not found: ${journalRef}`);
+
+    const resolvedPages: Array<{ id: string; name: string }> = [];
+    const missingPages: string[] = [];
+    for (const pid of pageIds) {
+      const page = journal.pages?.get(pid);
+      if (!page) {
+        missingPages.push(pid);
+        continue;
+      }
+      resolvedPages.push({ id: page.id, name: page.name });
+    }
+    if (missingPages.length > 0) {
+      throw new Error(
+        `Page(s) not found in journal "${journal.name}": ${missingPages.join(', ')}. ` +
+          `Nothing was deleted. Use list-journals to see each journal's page ids.`
+      );
+    }
+
+    try {
+      await journal.deleteEmbeddedDocuments(
+        'JournalEntryPage',
+        resolvedPages.map(p => p.id)
+      );
+      const survivors = resolvedPages.filter(p => journal.pages?.get(p.id));
+      if (survivors.length > 0) {
+        throw new Error(
+          `Foundry reported success but these pages still exist: ${survivors
+            .map(s => `${s.name} (${s.id})`)
+            .join(', ')}`
+        );
+      }
+      this.auditLog(
+        'manageJournals.delete-page',
+        { journalId: journal.id, count: resolvedPages.length },
+        'success'
+      );
+      return {
+        action,
+        deleted: resolvedPages,
+        total: resolvedPages.length,
+        journal: {
+          id: journal.id,
+          name: journal.name,
+          remainingPages: journal.pages?.size ?? 0,
+        },
+      };
+    } catch (error) {
+      this.auditLog(
+        'manageJournals.delete-page',
+        { journalId: journal.id, count: resolvedPages.length },
+        'failure',
+        error instanceof Error ? error.message : 'Unknown error'
+      );
+      throw error;
+    }
+  }
+
+  /**
    * Get journal entry content (first text page + page manifest)
    */
   async getJournalContent(journalId: string): Promise<{
@@ -10913,6 +11056,179 @@ export class FoundryDataAccess {
 
     await Actor.deleteDocuments(existing);
     return { deleted: existing, total: existing.length };
+  }
+
+  // ─── Chat & dice ────────────────────────────────────────────────────────────
+
+  /**
+   * Resolve a user reference (id or name) to a user id.
+   */
+  private resolveUserId(ref: string): string | null {
+    const raw = (ref ?? '').trim();
+    if (!raw) return null;
+    const byId = (game as any).users?.get?.(raw);
+    if (byId?.id) return byId.id;
+    const byName = (game as any).users?.find?.(
+      (u: any) => u.name?.toLowerCase() === raw.toLowerCase()
+    );
+    return byName?.id ?? null;
+  }
+
+  /**
+   * Resolve an actor reference (id or name) for chat speaker attribution.
+   */
+  private resolveSpeakerActor(ref?: string): any {
+    const raw = (ref ?? '').trim();
+    if (!raw) return null;
+    const actor =
+      (game as any).actors?.get?.(raw) ??
+      (game as any).actors?.find?.((a: any) => a.name?.toLowerCase() === raw.toLowerCase());
+    if (!actor) throw new Error(`Speaker actor not found: ${ref}`);
+    return actor;
+  }
+
+  private static readonly ROLL_MODES = ['publicroll', 'gmroll', 'blindroll', 'selfroll'];
+
+  /**
+   * Post a message to Foundry's chat log, optionally spoken as an actor.
+   *
+   * The bridge could already create chat messages internally (the roll-request
+   * flow does), but nothing exposed it as a tool — so "post to chat" was listed
+   * as impossible when it was merely unimplemented.
+   */
+  async sendChatMessage(params: {
+    content: string;
+    speakerActor?: string;
+    whisperTo?: string[];
+    flavor?: string;
+    rollMode?: string;
+  }): Promise<{
+    id: string;
+    content: string;
+    speaker: string | null;
+    whisperedTo: string[];
+    rollMode: string;
+  }> {
+    this.validateFoundryState();
+
+    const content = (params.content ?? '').trim();
+    if (!content) throw new Error('content is required and cannot be empty');
+
+    const rollMode = params.rollMode ?? 'publicroll';
+    if (!FoundryDataAccess.ROLL_MODES.includes(rollMode)) {
+      throw new Error(
+        `Invalid rollMode "${rollMode}". Valid values: ${FoundryDataAccess.ROLL_MODES.join(', ')}.`
+      );
+    }
+
+    const actor = this.resolveSpeakerActor(params.speakerActor);
+
+    const whisperTargets: string[] = [];
+    const unresolved: string[] = [];
+    for (const ref of params.whisperTo ?? []) {
+      const id = this.resolveUserId(ref);
+      if (id) whisperTargets.push(id);
+      else unresolved.push(ref);
+    }
+    if (unresolved.length > 0) {
+      throw new Error(
+        `Could not resolve these whisper target(s) to a Foundry user: ${unresolved.join(', ')}. ` +
+          `Nothing was sent.`
+      );
+    }
+
+    const messageData: any = {
+      content,
+      speaker: actor ? ChatMessage.getSpeaker({ actor }) : ChatMessage.getSpeaker({}),
+      ...(params.flavor ? { flavor: params.flavor } : {}),
+      ...(whisperTargets.length > 0 ? { whisper: whisperTargets } : {}),
+    };
+
+    const message = await (ChatMessage as any).create(messageData, { rollMode });
+    if (!message?.id) {
+      throw new Error('Foundry did not return a chat message — the message was not posted.');
+    }
+
+    this.auditLog('sendChatMessage', { speaker: actor?.name ?? null }, 'success');
+
+    return {
+      id: message.id,
+      content,
+      speaker: actor?.name ?? null,
+      whisperedTo: whisperTargets.map(id => (game as any).users?.get(id)?.name ?? id),
+      rollMode,
+    };
+  }
+
+  /**
+   * Evaluate a dice formula GM-side and post it to chat.
+   *
+   * Complements `requestPlayerRolls`: that asks a player to roll (right for
+   * player actions), this rolls directly (right for GM/NPC actions). The total
+   * and individual dice are returned so the result is verifiable from the MCP
+   * side rather than only visible in Foundry.
+   */
+  async rollDice(params: {
+    formula: string;
+    flavor?: string;
+    speakerActor?: string;
+    rollMode?: string;
+  }): Promise<{
+    formula: string;
+    total: number;
+    result: string;
+    dice: Array<{ faces: number; results: number[] }>;
+    flavor: string | null;
+    speaker: string | null;
+    rollMode: string;
+  }> {
+    this.validateFoundryState();
+
+    const formula = (params.formula ?? '').trim();
+    if (!formula) throw new Error('formula is required (e.g. "2d6+3", "1d20")');
+
+    const rollMode = params.rollMode ?? 'publicroll';
+    if (!FoundryDataAccess.ROLL_MODES.includes(rollMode)) {
+      throw new Error(
+        `Invalid rollMode "${rollMode}". Valid values: ${FoundryDataAccess.ROLL_MODES.join(', ')}.`
+      );
+    }
+
+    const actor = this.resolveSpeakerActor(params.speakerActor);
+
+    let roll: any;
+    try {
+      roll = new Roll(formula);
+      await roll.evaluate();
+    } catch (error) {
+      throw new Error(
+        `Could not evaluate dice formula "${formula}": ` +
+          `${error instanceof Error ? error.message : 'Unknown error'}. ` +
+          `Use standard Foundry syntax, e.g. "2d6+3", "1d20+5", "4d6kh3".`
+      );
+    }
+
+    const messageData: any = {
+      speaker: actor ? ChatMessage.getSpeaker({ actor }) : ChatMessage.getSpeaker({}),
+      ...(params.flavor ? { flavor: params.flavor } : {}),
+    };
+
+    await roll.toMessage(messageData, { create: true, rollMode });
+
+    this.auditLog('rollDice', { formula, total: roll.total }, 'success');
+
+    return {
+      formula,
+      total: roll.total,
+      result: roll.result,
+      dice: (roll.dice ?? []).map((d: any) => ({
+        faces: d.faces,
+        results: (d.results ?? []).map((r: any) => r.result),
+      })),
+      flavor: params.flavor ?? null,
+      speaker: actor?.name ?? null,
+      rollMode,
+    };
   }
 
   // ─── mgt2e ──────────────────────────────────────────────────────────────────
