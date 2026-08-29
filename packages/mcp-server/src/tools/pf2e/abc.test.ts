@@ -43,7 +43,116 @@ describe('PF2eAbcItemTools.getToolDefinitions', () => {
       'class',
       'deity',
       'feat',
+      'action',
+      'effect',
+      'spell',
     ]);
+  });
+});
+
+describe('PF2eAbcItemTools content item types (action / effect / spell)', () => {
+  it('forwards a scratch-built action', async () => {
+    const { tools, query } = makeTools();
+    const result = await tools.handleCreateAbcItem({
+      itemType: 'action',
+      name: 'Squirt Flower',
+      actionType: 'action',
+      actions: 1,
+      category: 'offensive',
+    });
+    expect(result.success).toBe(true);
+    const call = query.mock.calls.find(c => c[0] === 'foundry-mcp-bridge.createPf2eAbcItem');
+    expect(call![1].itemType).toBe('action');
+    expect(call![1].category).toBe('offensive');
+  });
+
+  it('rejects an action category outside PF2e\'s closed set', async () => {
+    const { tools } = makeTools();
+    const result = await tools.handleCreateAbcItem({
+      itemType: 'action',
+      name: 'Bad',
+      category: 'hilarious',
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('accepts a null action category (uncategorised)', async () => {
+    const { tools } = makeTools();
+    const result = await tools.handleCreateAbcItem({
+      itemType: 'action',
+      name: 'Plain Action',
+      category: null,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('forwards an effect with a structured duration', async () => {
+    const { tools, query } = makeTools();
+    const result = await tools.handleCreateAbcItem({
+      itemType: 'effect',
+      name: 'Clown Shame',
+      duration: { value: 3, unit: 'rounds', sustained: false },
+      tokenIcon: true,
+    });
+    expect(result.success).toBe(true);
+    const call = query.mock.calls.find(c => c[0] === 'foundry-mcp-bridge.createPf2eAbcItem');
+    expect(call![1].duration.unit).toBe('rounds');
+  });
+
+  it('rejects an unknown effect duration unit', async () => {
+    const { tools } = makeTools();
+    const result = await tools.handleCreateAbcItem({
+      itemType: 'effect',
+      name: 'Bad Effect',
+      duration: { value: 3, unit: 'fortnights' },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('forwards a spell with traditions and casting details', async () => {
+    const { tools, query } = makeTools();
+    const result = await tools.handleCreateAbcItem({
+      itemType: 'spell',
+      name: 'Pie Barrage',
+      level: 3,
+      traditions: ['occult', 'primal'],
+      time: '2',
+      range: '30 feet',
+    });
+    expect(result.success).toBe(true);
+    const call = query.mock.calls.find(c => c[0] === 'foundry-mcp-bridge.createPf2eAbcItem');
+    expect(call![1].traditions).toEqual(['occult', 'primal']);
+    expect(call![1].level).toBe(3);
+  });
+
+  it('rejects an invalid spell tradition', async () => {
+    const { tools } = makeTools();
+    const result = await tools.handleCreateAbcItem({
+      itemType: 'spell',
+      name: 'Bad Spell',
+      traditions: ['clownish'],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a spell rank above 10', async () => {
+    const { tools } = makeTools();
+    const result = await tools.handleCreateAbcItem({
+      itemType: 'spell',
+      name: 'Too Big',
+      level: 11,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a cross-mode field (spell param on an action)', async () => {
+    const { tools } = makeTools();
+    const result = await tools.handleCreateAbcItem({
+      itemType: 'action',
+      name: 'Confused',
+      traditions: ['arcane'],
+    });
+    expect(result.success).toBe(false);
   });
 });
 
@@ -87,9 +196,12 @@ describe('PF2eAbcItemTools.handleCreateAbcItem', () => {
     expect(query).not.toHaveBeenCalled();
   });
 
-  it('rejects an unknown itemType', async () => {
+  it('rejects an unsupported itemType', async () => {
     const { tools } = makeTools();
-    const result = await tools.handleCreateAbcItem({ itemType: 'spell', name: 'X' });
+    // 'weapon' is a real PF2e item type but not one this tool builds — those go
+    // through manage-world-items. ('spell' used to serve as this example, until
+    // it became a supported mode.)
+    const result = await tools.handleCreateAbcItem({ itemType: 'weapon', name: 'X' });
     expect(result.success).toBe(false);
     expect(result.error).toContain('itemType');
   });

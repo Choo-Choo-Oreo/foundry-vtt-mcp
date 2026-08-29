@@ -26,7 +26,27 @@ export interface PF2eAbcItemToolsOptions {
   logger: Logger;
 }
 
-const ITEM_TYPES = ['ancestry', 'heritage', 'background', 'class', 'deity', 'feat'] as const;
+const ITEM_TYPES = [
+  'ancestry',
+  'heritage',
+  'background',
+  'class',
+  'deity',
+  'feat',
+  'action',
+  'effect',
+  'spell',
+] as const;
+const ACTION_CATEGORIES = ['defensive', 'interaction', 'offensive', 'familiar'] as const;
+const EFFECT_DURATION_UNITS = [
+  'rounds',
+  'minutes',
+  'hours',
+  'days',
+  'unlimited',
+  'encounter',
+] as const;
+const SPELL_TRADITIONS = ['arcane', 'divine', 'occult', 'primal'] as const;
 const PF2E_SIZES = ['tiny', 'sm', 'med', 'lg', 'huge', 'grg'] as const;
 const RARITIES = ['common', 'uncommon', 'rare', 'unique'] as const;
 const VISIONS = ['normal', 'low-light', 'darkvision', 'greater-darkvision'] as const;
@@ -168,6 +188,57 @@ const schemas: Record<(typeof ITEM_TYPES)[number], z.ZodTypeAny> = {
       onlyLevel1: z.boolean().optional(),
     })
     .strict(),
+  action: z
+    .object({
+      itemType: z.literal('action'),
+      ...baseShape,
+      actionType: z.enum(FEAT_ACTION_TYPES).optional(),
+      actions: z.number().int().min(1).max(3).nullable().optional(),
+      category: z
+        .enum(ACTION_CATEGORIES)
+        .nullable()
+        .optional()
+        .describe('null (default) = an uncategorised action.'),
+      frequency: z.record(z.any()).optional(),
+    })
+    .strict(),
+  effect: z
+    .object({
+      itemType: z.literal('effect'),
+      ...baseShape,
+      level: z.number().int().min(0).max(30).optional(),
+      duration: z
+        .object({
+          value: z.number().int().optional(),
+          unit: z.enum(EFFECT_DURATION_UNITS).optional(),
+          expiry: z.enum(['turn-start', 'turn-end', 'round-end']).nullable().optional(),
+          sustained: z.boolean().optional(),
+        })
+        .optional(),
+      badge: z.record(z.any()).optional(),
+      tokenIcon: z.boolean().optional(),
+      unidentified: z.boolean().optional(),
+    })
+    .strict(),
+  spell: z
+    .object({
+      itemType: z.literal('spell'),
+      ...baseShape,
+      level: z.number().int().min(1).max(10).optional().describe('Spell rank, 1-10.'),
+      traditions: z.array(z.enum(SPELL_TRADITIONS)).optional(),
+      time: z.string().optional().describe('Casting time, e.g. "2" (two actions), "1 minute".'),
+      range: z.string().optional(),
+      target: z.string().optional(),
+      area: z.record(z.any()).nullable().optional(),
+      defense: z.record(z.any()).nullable().optional(),
+      cost: z.string().optional(),
+      requirements: z.string().optional(),
+      duration: z
+        .object({ value: z.string().optional(), sustained: z.boolean().optional() })
+        .optional(),
+      counteraction: z.boolean().optional(),
+    })
+    .strict(),
 };
 
 export class PF2eAbcItemTools {
@@ -184,8 +255,8 @@ export class PF2eAbcItemTools {
       {
         name: 'pf2e-create-abc-item',
         description:
-          '[Pathfinder 2e only] Build a homebrew Ancestry, Heritage, Background, Class, Deity, or Feat ' +
-          'and (optionally) attach it to a character. Set `itemType` to pick the mode. ' +
+          '[Pathfinder 2e only] Build a homebrew Ancestry, Heritage, Background, Class, Deity, Feat, ' +
+          'Action, Effect, or Spell and (optionally) attach it to a character. Set `itemType` to pick the mode. ' +
           'Two ways to build: give `basedOn` (e.g. "pf2e.ancestries.Goblin" or a "Compendium.…" UUID) ' +
           'to clone-and-tweak an existing item, or omit it to build from a minimal template. ' +
           '`overrides` is deep-merged onto system data last for anything the friendly params miss. ' +
@@ -197,7 +268,10 @@ export class PF2eAbcItemTools {
           'background → boosts, trainedSkills, trainedLore; ' +
           'class → keyAbility, hp, perception, savingThrows, attacks, defenses, spellcasting, trainedSkills (proficiency ranks 0-4); ' +
           'deity → category, sanctification, domains, font, attribute, skill, weapons; ' +
-          'feat → level, category, actionType, actions, prerequisites, maxTakable, onlyLevel1.',
+          'feat → level, category, actionType, actions, prerequisites, maxTakable, onlyLevel1; ' +
+          'action → actionType, actions, category (defensive/interaction/offensive/familiar or null), frequency; ' +
+          'effect → level, duration {value,unit,expiry,sustained}, badge, tokenIcon, unidentified; ' +
+          'spell → level (rank 1-10), traditions, time, range, target, area, defense, cost, requirements, duration, counteraction.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -369,6 +443,46 @@ export class PF2eAbcItemTools {
             },
             maxTakable: { type: 'number', description: 'feat: how many times it can be taken.' },
             onlyLevel1: { type: 'boolean', description: 'feat: ancestry feat locked to level 1.' },
+
+            frequency: {
+              type: 'object',
+              description: 'action: usage frequency, e.g. { max: 1, per: "day" }.',
+            },
+            duration: {
+              type: 'object',
+              description:
+                'effect: { value, unit (rounds/minutes/hours/days/unlimited/encounter), expiry, sustained }. ' +
+                'spell: { value (text), sustained }.',
+            },
+            badge: {
+              type: 'object',
+              description: 'effect: counter/value badge shown on the effect icon.',
+            },
+            tokenIcon: {
+              type: 'boolean',
+              description: 'effect: show the icon on the token. Default true.',
+            },
+            unidentified: {
+              type: 'boolean',
+              description: 'effect: hide the effect name from players.',
+            },
+
+            traditions: {
+              type: 'array',
+              items: { type: 'string', enum: [...SPELL_TRADITIONS] },
+              description: 'spell: magic traditions.',
+            },
+            time: { type: 'string', description: 'spell: casting time, e.g. "2", "1 minute".' },
+            range: { type: 'string', description: 'spell: range, e.g. "30 feet".' },
+            target: { type: 'string', description: 'spell: target text.' },
+            area: { type: 'object', description: 'spell: area, e.g. { type: "burst", value: 20 }.' },
+            defense: {
+              type: 'object',
+              description: 'spell: defense/save, e.g. { save: { statistic: "reflex", basic: true } }.',
+            },
+            cost: { type: 'string', description: 'spell: material cost text.' },
+            requirements: { type: 'string', description: 'spell: casting requirements text.' },
+            counteraction: { type: 'boolean', description: 'spell: can be used to counteract.' },
           },
           required: ['itemType'],
         },

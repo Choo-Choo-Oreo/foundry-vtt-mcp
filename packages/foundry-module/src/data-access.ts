@@ -11571,6 +11571,9 @@ const PF2E_ABC_ITEM_TYPES = new Set([
   'class',
   'deity',
   'feat',
+  'action',
+  'effect',
+  'spell',
 ]);
 
 /** PF2e's own default-icon art per item type. A missing file just renders blank. */
@@ -11581,20 +11584,42 @@ const PF2E_ITEM_DEFAULT_IMG: Record<string, string> = {
   class: 'systems/pf2e/icons/default-icons/class.svg',
   deity: 'systems/pf2e/icons/default-icons/deity.svg',
   feat: 'systems/pf2e/icons/default-icons/feat.svg',
+  action: 'systems/pf2e/icons/default-icons/action.svg',
+  effect: 'systems/pf2e/icons/default-icons/effect.svg',
+  spell: 'systems/pf2e/icons/default-icons/spell.svg',
 };
 
 /** Feat categories the character sheet slots by class-defined level (vs. unslotted bonus/feature). */
 const SLOTTED_FEAT_CATEGORIES = new Set(['ancestry', 'class', 'skill', 'general']);
 
-/** Item types whose `system.traits` schema has a `value` array. */
-const PF2E_TYPES_WITH_TRAIT_VALUE = new Set(['ancestry', 'background', 'heritage', 'feat']);
-/** Item types whose `system.traits` schema has a `rarity` field. */
+/**
+ * Item types whose `system.traits` schema has a `value` array.
+ * Verified against the system's own schemas: action/effect declare
+ * `traits: {otherTags, value}`, spell picks up `value` from the shared
+ * "traits" template in template.json.
+ */
+const PF2E_TYPES_WITH_TRAIT_VALUE = new Set([
+  'ancestry',
+  'background',
+  'heritage',
+  'feat',
+  'action',
+  'effect',
+  'spell',
+]);
+/**
+ * Item types whose `system.traits` schema has a `rarity` field.
+ * Spell includes the "rarity" template; action and effect deliberately do NOT
+ * (their schemas declare only otherTags + value), so writing rarity there would
+ * be silently dropped.
+ */
 const PF2E_TYPES_WITH_TRAIT_RARITY = new Set([
   'ancestry',
   'background',
   'heritage',
   'class',
   'feat',
+  'spell',
 ]);
 
 /**
@@ -11673,7 +11698,55 @@ const PF2E_ITEM_TEMPLATES: Record<string, Record<string, any>> = {
       suppressedFeatures: [],
     },
   },
+  // Shapes below taken from the system's own schemas (template.json for spell,
+  // the AbilitySystemData / EffectSystemData defineSchema() blocks for
+  // action / effect) rather than inferred from sample items.
+  action: {
+    actionType: { value: 'action' },
+    actions: { value: 1 },
+    category: null,
+  },
+  effect: {
+    level: { value: 1 },
+    duration: { value: -1, unit: 'unlimited', expiry: null, sustained: false },
+    start: { value: 0, initiative: null },
+    tokenIcon: { show: true },
+    unidentified: false,
+    badge: null,
+    fromSpell: false,
+    context: null,
+  },
+  spell: {
+    level: { value: 1 },
+    requirements: '',
+    target: { value: '' },
+    range: { value: '' },
+    area: null,
+    time: { value: '2' },
+    duration: { value: '', sustained: false },
+    damage: {},
+    defense: null,
+    cost: { value: '' },
+    location: { value: null },
+    counteraction: false,
+  },
 };
+
+/** PF2e ability (`action` item) categories; null = an uncategorised action. */
+const PF2E_ACTION_CATEGORIES = new Set(['defensive', 'interaction', 'offensive', 'familiar']);
+
+/** Duration units an `effect` accepts, per EffectSystemData's schema. */
+const PF2E_EFFECT_DURATION_UNITS = new Set([
+  'rounds',
+  'minutes',
+  'hours',
+  'days',
+  'unlimited',
+  'encounter',
+]);
+
+/** Magic traditions a spell can belong to. */
+const PF2E_SPELL_TRADITIONS = new Set(['arcane', 'divine', 'occult', 'primal']);
 
 /** The CONFIG.PF2E trait dictionary an item type's `system.traits.value` is validated against. */
 function pf2eKnownTraitsFor(type: string): Record<string, string> | undefined {
@@ -11687,6 +11760,10 @@ function pf2eKnownTraitsFor(type: string): Record<string, string> | undefined {
       return cfg.featTraits;
     case 'class':
       return cfg.classTraits;
+    case 'spell':
+      return cfg.spellTraits;
+    // action / effect validate against the action-trait vocabulary, which is
+    // also the safest default for anything else.
     default:
       return cfg.actionTraits;
   }
@@ -11855,6 +11932,82 @@ function applyPf2eAbcParams(
       }
       break;
     }
+    case 'action': {
+      if (typeof data.actionType === 'string') system.actionType = { value: data.actionType };
+      if (data.actions === null || typeof data.actions === 'number') {
+        system.actions = { value: data.actions };
+      }
+      if (data.category === null) {
+        system.category = null;
+      } else if (typeof data.category === 'string') {
+        // Unlike feats, an ability's category is a closed set. An unknown value
+        // is dropped silently by PF2e, so reject it here instead.
+        if (!PF2E_ACTION_CATEGORIES.has(data.category)) {
+          throw new Error(
+            `Invalid action category "${data.category}". Valid values: ` +
+              `${[...PF2E_ACTION_CATEGORIES].join(', ')}, or null for an uncategorised action.`
+          );
+        }
+        system.category = data.category;
+      }
+      if (data.frequency) system.frequency = data.frequency;
+      break;
+    }
+    case 'effect': {
+      if (typeof data.level === 'number') system.level = { value: data.level };
+      if (data.duration) {
+        const unit = data.duration.unit ?? 'unlimited';
+        if (!PF2E_EFFECT_DURATION_UNITS.has(unit)) {
+          throw new Error(
+            `Invalid effect duration unit "${unit}". Valid values: ` +
+              `${[...PF2E_EFFECT_DURATION_UNITS].join(', ')}.`
+          );
+        }
+        const unlimited = unit === 'unlimited' || unit === 'encounter';
+        system.duration = {
+          // -1 is PF2e's "no countdown" sentinel; a real value only makes
+          // sense for the counted units.
+          value: typeof data.duration.value === 'number' ? data.duration.value : unlimited ? -1 : 1,
+          unit,
+          expiry: unlimited ? null : (data.duration.expiry ?? 'turn-start'),
+          sustained: !!data.duration.sustained,
+        };
+      }
+      if (data.badge) system.badge = data.badge;
+      if (typeof data.tokenIcon === 'boolean') system.tokenIcon = { show: data.tokenIcon };
+      if (typeof data.unidentified === 'boolean') system.unidentified = data.unidentified;
+      break;
+    }
+    case 'spell': {
+      if (typeof data.level === 'number') system.level = { value: data.level };
+      if (Array.isArray(data.traditions)) {
+        const bad = data.traditions.filter((t: any) => !PF2E_SPELL_TRADITIONS.has(String(t)));
+        if (bad.length > 0) {
+          throw new Error(
+            `Invalid spell tradition(s): ${bad.join(', ')}. Valid values: ` +
+              `${[...PF2E_SPELL_TRADITIONS].join(', ')}.`
+          );
+        }
+        // traditions live under system.traits, which finalizePf2eItemSource
+        // rebuilds — stash them and let that merge them in.
+        system.traits = { ...(system.traits ?? {}), traditions: data.traditions };
+      }
+      if (typeof data.time === 'string') system.time = { value: data.time };
+      if (typeof data.range === 'string') system.range = { value: data.range };
+      if (typeof data.target === 'string') system.target = { value: data.target };
+      if (typeof data.cost === 'string') system.cost = { value: data.cost };
+      if (typeof data.requirements === 'string') system.requirements = data.requirements;
+      if (data.area !== undefined) system.area = data.area;
+      if (data.defense !== undefined) system.defense = data.defense;
+      if (data.duration) {
+        system.duration = {
+          value: typeof data.duration.value === 'string' ? data.duration.value : '',
+          sustained: !!data.duration.sustained,
+        };
+      }
+      if (typeof data.counteraction === 'boolean') system.counteraction = data.counteraction;
+      break;
+    }
   }
 }
 
@@ -11921,6 +12074,17 @@ function finalizePf2eItemSource(source: Record<string, any>, data: Record<string
     traits.rarity = typeof data.rarity === 'string' ? data.rarity : (t.rarity ?? 'common');
   } else if (typeof t.rarity === 'string') {
     traits.rarity = t.rarity;
+  }
+  // A spell's magic traditions also live under system.traits. This object is
+  // rebuilt from scratch above, so carry them across explicitly or they'd be
+  // dropped the same way unknown trait tags used to be.
+  if (type === 'spell') {
+    const traditions = Array.isArray(data.traditions)
+      ? data.traditions
+      : Array.isArray(t.traditions)
+        ? t.traditions
+        : [];
+    traits.traditions = traditions;
   }
   sys.traits = traits;
 
