@@ -27,6 +27,9 @@ import { ActorManagementTools } from './tools/actor-management.js';
 import { FolderManagementTools } from './tools/folder-management.js';
 import { JournalManagementTools } from './tools/journal-management.js';
 import { ChatTools } from './tools/chat.js';
+import { RollTableManagementTools } from './tools/rolltable-management.js';
+import { MacroManagementTools } from './tools/macro-management.js';
+import { ImageManagementTools } from './tools/image-management.js';
 
 import { QuestCreationTools } from './tools/quest-creation.js';
 
@@ -1202,6 +1205,9 @@ async function startBackend(): Promise<void> {
   const folderManagementTools = new FolderManagementTools({ foundryClient, logger });
   const journalManagementTools = new JournalManagementTools({ foundryClient, logger });
   const chatTools = new ChatTools({ foundryClient, logger });
+  const rollTableManagementTools = new RollTableManagementTools({ foundryClient, logger });
+  const macroManagementTools = new MacroManagementTools({ foundryClient, logger });
+  const imageManagementTools = new ImageManagementTools({ foundryClient, logger });
 
   const dsa5CharacterCreator = new DSA5CharacterCreator({ foundryClient, logger });
 
@@ -1435,6 +1441,9 @@ async function startBackend(): Promise<void> {
     ...folderManagementTools.getToolDefinitions(),
     ...journalManagementTools.getToolDefinitions(),
     ...chatTools.getToolDefinitions(),
+    ...rollTableManagementTools.getToolDefinitions(),
+    ...macroManagementTools.getToolDefinitions(),
+    ...imageManagementTools.getToolDefinitions(),
 
     ...dsa5CharacterCreator.getToolDefinitions(),
 
@@ -1644,6 +1653,23 @@ async function startBackend(): Promise<void> {
 
                 case 'roll-dice':
                   result = await chatTools.handleRollDice(args);
+
+                  break;
+
+                // Roll tables, macros, images
+
+                case 'manage-rolltables':
+                  result = await rollTableManagementTools.handleManageRollTables(args);
+
+                  break;
+
+                case 'manage-macros':
+                  result = await macroManagementTools.handleManageMacros(args);
+
+                  break;
+
+                case 'manage-images':
+                  result = await imageManagementTools.handleManageImages(args);
 
                   break;
 

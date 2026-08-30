@@ -4339,7 +4339,9 @@ export class FoundryDataAccess {
     // ── delete-page ──────────────────────────────────────────────────────────
     const journalRef = (params.journalId ?? '').trim();
     if (!journalRef) {
-      throw new Error('action "delete-page" requires "journalId" (the journal containing the page)');
+      throw new Error(
+        'action "delete-page" requires "journalId" (the journal containing the page)'
+      );
     }
     const pageIds = params.pageIds ?? [];
     if (!Array.isArray(pageIds) || pageIds.length === 0) {
@@ -11231,6 +11233,839 @@ export class FoundryDataAccess {
     };
   }
 
+  // ---------------------------------------------------------------------------
+  // Roll tables (manage-rolltables)
+  // ---------------------------------------------------------------------------
+
+  /** The field TableResult stores its text under: `description` since v13, `text` before. */
+  private tableResultTextKey(): string {
+    const fields = (foundry as any).documents?.BaseTableResult?.schema?.fields ?? {};
+    return 'description' in fields ? 'description' : 'text';
+  }
+
+  private resolveRollTable(idOrName: string): any {
+    const tables = (game as any).tables;
+    return (
+      tables?.get(idOrName) ??
+      tables?.find((t: any) => t.name?.toLowerCase() === idOrName.toLowerCase()) ??
+      null
+    );
+  }
+
+  /**
+   * Turn friendly result rows into TableResult source data. If no row carries
+   * an explicit range, rows are auto-numbered 1..N (a mix of some-with and
+   * some-without is ambiguous and rejected).
+   */
+  private buildTableResults(
+    rows: Array<{
+      text: string;
+      weight?: number;
+      range?: [number, number];
+      img?: string;
+      documentUuid?: string;
+    }>
+  ): { results: Array<Record<string, any>>; maxRoll: number } {
+    const withRange = rows.filter(r => Array.isArray(r.range)).length;
+    if (withRange > 0 && withRange < rows.length) {
+      throw new Error(
+        `${withRange} of ${rows.length} result rows have a "range" — give every row a range, ` +
+          `or none (rows are then auto-numbered 1..${rows.length}).`
+      );
+    }
+
+    const textKey = this.tableResultTextKey();
+    const TYPES: any = (CONST as any).TABLE_RESULT_TYPES ?? {};
+    let maxRoll = 0;
+
+    const results = rows.map((row, i) => {
+      const range = row.range ?? [i + 1, i + 1];
+      if (range[0] > range[1]) {
+        throw new Error(`Result "${row.text}": range [${range[0]}, ${range[1]}] is inverted.`);
+      }
+      maxRoll = Math.max(maxRoll, range[1]);
+      const data: Record<string, any> = {
+        type: row.documentUuid ? (TYPES.DOCUMENT ?? 'document') : (TYPES.TEXT ?? 'text'),
+        [textKey]: row.text,
+        weight: row.weight ?? 1,
+        range,
+        drawn: false,
+      };
+      if (row.img) data.img = row.img;
+      if (row.documentUuid) data.documentUuid = row.documentUuid;
+      return data;
+    });
+
+    return { results, maxRoll };
+  }
+
+  private describeTableResult(r: any): Record<string, any> {
+    const textKey = this.tableResultTextKey();
+    return {
+      id: r.id,
+      text: r[textKey] ?? r.text ?? r.name ?? '',
+      weight: r.weight ?? 1,
+      range: r.range ?? null,
+      drawn: !!r.drawn,
+      ...(r.documentUuid ? { documentUuid: r.documentUuid } : {}),
+      ...(r.img ? { img: r.img } : {}),
+    };
+  }
+
+  async manageRollTables(params: {
+    action: 'create' | 'list' | 'get' | 'update' | 'move' | 'delete' | 'roll';
+    id?: string;
+    ids?: string[];
+    name?: string;
+    description?: string;
+    formula?: string;
+    replacement?: boolean;
+    displayRoll?: boolean;
+    img?: string;
+    folder?: string;
+    results?: Array<{
+      text: string;
+      weight?: number;
+      range?: [number, number];
+      img?: string;
+      documentUuid?: string;
+    }>;
+    count?: number;
+    displayChat?: boolean;
+  }): Promise<any> {
+    this.validateFoundryState();
+
+    const RollTableCls = (globalThis as any).RollTable;
+
+    switch (params.action) {
+      case 'create': {
+        if (!params.name?.trim()) throw new Error('"name" is required to create a roll table');
+        if (!params.results?.length) {
+          throw new Error('"results" must contain at least one row: [{ "text": "..." }, ...]');
+        }
+        const { results, maxRoll } = this.buildTableResults(params.results);
+        const folderId = params.folder
+          ? await this.resolveFolderPath(params.folder, 'RollTable')
+          : null;
+        if (params.folder && !folderId) {
+          throw new Error(`Folder "${params.folder}" could not be resolved or created.`);
+        }
+
+        const table = await RollTableCls.create({
+          name: params.name.trim(),
+          description: params.description ?? '',
+          formula: params.formula?.trim() || `1d${maxRoll}`,
+          replacement: params.replacement ?? true,
+          displayRoll: params.displayRoll ?? true,
+          ...(params.img ? { img: params.img } : {}),
+          folder: folderId,
+          results,
+        });
+        if (!table?.id) throw new Error('RollTable.create returned nothing');
+
+        this.auditLog('manageRollTables', { action: 'create', name: table.name }, 'success');
+        return {
+          id: table.id,
+          name: table.name,
+          formula: table.formula,
+          resultCount: table.results?.size ?? results.length,
+          folder: table.folder?.name ?? null,
+        };
+      }
+
+      case 'list': {
+        const tables = Array.from(((game as any).tables ?? []) as Iterable<any>);
+        return {
+          tables: tables.map((t: any) => ({
+            id: t.id,
+            name: t.name,
+            formula: t.formula ?? null,
+            resultCount: t.results?.size ?? 0,
+            replacement: t.replacement ?? true,
+            folder: t.folder?.name ?? null,
+          })),
+          total: tables.length,
+        };
+      }
+
+      case 'get': {
+        const table = this.resolveRollTable(params.id!);
+        if (!table) throw new Error(`Roll table not found: "${params.id}"`);
+        return {
+          id: table.id,
+          name: table.name,
+          description: table.description ?? '',
+          formula: table.formula ?? null,
+          replacement: table.replacement ?? true,
+          displayRoll: table.displayRoll ?? true,
+          img: table.img ?? null,
+          folder: table.folder?.name ?? null,
+          results: Array.from((table.results ?? []) as Iterable<any>).map((r: any) =>
+            this.describeTableResult(r)
+          ),
+        };
+      }
+
+      case 'update': {
+        const table = this.resolveRollTable(params.id!);
+        if (!table) throw new Error(`Roll table not found: "${params.id}"`);
+
+        const patch: Record<string, any> = {};
+        if (params.name !== undefined) patch.name = params.name;
+        if (params.description !== undefined) patch.description = params.description;
+        if (params.formula !== undefined) patch.formula = params.formula;
+        if (params.replacement !== undefined) patch.replacement = params.replacement;
+        if (params.displayRoll !== undefined) patch.displayRoll = params.displayRoll;
+        if (params.img !== undefined) patch.img = params.img;
+        if (Object.keys(patch).length > 0) await table.update(patch);
+
+        let resultsReplaced = false;
+        if (params.results?.length) {
+          const { results, maxRoll } = this.buildTableResults(params.results);
+          const oldIds = Array.from((table.results ?? []) as Iterable<any>).map((r: any) => r.id);
+          if (oldIds.length > 0) await table.deleteEmbeddedDocuments('TableResult', oldIds);
+          await table.createEmbeddedDocuments('TableResult', results);
+          // Keep the formula in step with an auto-numbered replacement set.
+          if (params.formula === undefined && !params.results.some(r => r.range)) {
+            await table.update({ formula: `1d${maxRoll}` });
+          }
+          resultsReplaced = true;
+        }
+
+        this.auditLog('manageRollTables', { action: 'update', id: table.id }, 'success');
+        return {
+          id: table.id,
+          name: table.name,
+          formula: table.formula,
+          resultCount: table.results?.size ?? 0,
+          resultsReplaced,
+        };
+      }
+
+      case 'move': {
+        const table = this.resolveRollTable(params.id!);
+        if (!table) throw new Error(`Roll table not found: "${params.id}"`);
+        const folderId = await this.resolveFolderPath(params.folder!, 'RollTable');
+        if (!folderId) {
+          throw new Error(`Folder "${params.folder}" could not be resolved or created.`);
+        }
+        await table.update({ folder: folderId });
+        this.auditLog('manageRollTables', { action: 'move', id: table.id }, 'success');
+        return { id: table.id, name: table.name, folder: table.folder?.name ?? null };
+      }
+
+      case 'delete': {
+        const resolved: Array<{ id: string; name: string }> = [];
+        const missing: string[] = [];
+        for (const id of params.ids ?? []) {
+          const table = (game as any).tables?.get(id);
+          if (table) resolved.push({ id: table.id, name: table.name });
+          else missing.push(id);
+        }
+        if (missing.length > 0) {
+          throw new Error(
+            `Roll table id(s) not found: ${missing.join(', ')}. Nothing was deleted — ` +
+              `use action:"list" to get valid ids.`
+          );
+        }
+        if (resolved.length === 0) throw new Error('No roll table ids were given');
+
+        await RollTableCls.deleteDocuments(resolved.map(r => r.id));
+        const survivors = resolved.filter(r => (game as any).tables?.get(r.id));
+        if (survivors.length > 0) {
+          throw new Error(
+            `Foundry reported success but these tables still exist: ${survivors
+              .map(s => `${s.name} (${s.id})`)
+              .join(', ')}`
+          );
+        }
+        this.auditLog('manageRollTables', { action: 'delete', count: resolved.length }, 'success');
+        return { deleted: resolved, total: resolved.length };
+      }
+
+      case 'roll': {
+        const table = this.resolveRollTable(params.id!);
+        if (!table) throw new Error(`Roll table not found: "${params.id}"`);
+        const count = params.count ?? 1;
+        const displayChat = params.displayChat ?? true;
+
+        let draw: any;
+        try {
+          draw =
+            count === 1
+              ? await table.draw({ displayChat })
+              : await table.drawMany(count, { displayChat });
+        } catch (error) {
+          throw new Error(
+            `Could not draw from "${table.name}": ` +
+              `${error instanceof Error ? error.message : String(error)}. ` +
+              `If the table draws without replacement it may be exhausted — ` +
+              `reset it by updating "replacement", or re-create the results.`
+          );
+        }
+
+        const drawn = (draw?.results ?? []).map((r: any) => this.describeTableResult(r));
+        this.auditLog('manageRollTables', { action: 'roll', id: table.id, count }, 'success');
+        return {
+          table: table.name,
+          roll: draw?.roll?.total ?? null,
+          requested: count,
+          drawn,
+          ...(drawn.length < count
+            ? { warning: `Only ${drawn.length} of ${count} draws were possible (table exhausted?)` }
+            : {}),
+        };
+      }
+
+      default:
+        throw new Error(`Unknown manage-rolltables action: "${(params as any).action}"`);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Macros (manage-macros)
+  // ---------------------------------------------------------------------------
+
+  private resolveMacro(idOrName: string): any {
+    const macros = (game as any).macros;
+    return (
+      macros?.get(idOrName) ??
+      macros?.find((m: any) => m.name?.toLowerCase() === idOrName.toLowerCase()) ??
+      null
+    );
+  }
+
+  async manageMacros(params: {
+    action: 'create' | 'list' | 'get' | 'update' | 'move' | 'delete' | 'execute';
+    id?: string;
+    ids?: string[];
+    name?: string;
+    type?: 'script' | 'chat';
+    command?: string;
+    img?: string;
+    folder?: string;
+  }): Promise<any> {
+    this.validateFoundryState();
+
+    const MacroCls = (globalThis as any).Macro;
+
+    switch (params.action) {
+      case 'create': {
+        if (!params.name?.trim()) throw new Error('"name" is required to create a macro');
+        if (!params.command?.trim()) throw new Error('"command" is required to create a macro');
+        const folderId = params.folder
+          ? await this.resolveFolderPath(params.folder, 'Macro')
+          : null;
+        if (params.folder && !folderId) {
+          throw new Error(`Folder "${params.folder}" could not be resolved or created.`);
+        }
+
+        const macro = await MacroCls.create({
+          name: params.name.trim(),
+          type: params.type ?? 'script',
+          command: params.command,
+          scope: 'global',
+          ...(params.img ? { img: params.img } : {}),
+          folder: folderId,
+        });
+        if (!macro?.id) throw new Error('Macro.create returned nothing');
+
+        this.auditLog(
+          'manageMacros',
+          { action: 'create', name: macro.name, type: macro.type },
+          'success'
+        );
+        return {
+          id: macro.id,
+          name: macro.name,
+          type: macro.type,
+          folder: macro.folder?.name ?? null,
+        };
+      }
+
+      case 'list': {
+        const macros = Array.from(((game as any).macros ?? []) as Iterable<any>);
+        return {
+          macros: macros.map((m: any) => ({
+            id: m.id,
+            name: m.name,
+            type: m.type,
+            folder: m.folder?.name ?? null,
+            commandPreview:
+              (m.command ?? '').length > 120 ? `${m.command.slice(0, 120)}…` : (m.command ?? ''),
+          })),
+          total: macros.length,
+        };
+      }
+
+      case 'get': {
+        const macro = this.resolveMacro(params.id!);
+        if (!macro) throw new Error(`Macro not found: "${params.id}"`);
+        return {
+          id: macro.id,
+          name: macro.name,
+          type: macro.type,
+          command: macro.command ?? '',
+          img: macro.img ?? null,
+          folder: macro.folder?.name ?? null,
+        };
+      }
+
+      case 'update': {
+        const macro = this.resolveMacro(params.id!);
+        if (!macro) throw new Error(`Macro not found: "${params.id}"`);
+        const patch: Record<string, any> = {};
+        if (params.name !== undefined) patch.name = params.name;
+        if (params.type !== undefined) patch.type = params.type;
+        if (params.command !== undefined) patch.command = params.command;
+        if (params.img !== undefined) patch.img = params.img;
+        if (Object.keys(patch).length === 0) {
+          throw new Error('Nothing to update — give at least one of name/type/command/img');
+        }
+        await macro.update(patch);
+        this.auditLog('manageMacros', { action: 'update', id: macro.id }, 'success');
+        return { id: macro.id, name: macro.name, type: macro.type };
+      }
+
+      case 'move': {
+        const macro = this.resolveMacro(params.id!);
+        if (!macro) throw new Error(`Macro not found: "${params.id}"`);
+        const folderId = await this.resolveFolderPath(params.folder!, 'Macro');
+        if (!folderId) {
+          throw new Error(`Folder "${params.folder}" could not be resolved or created.`);
+        }
+        await macro.update({ folder: folderId });
+        this.auditLog('manageMacros', { action: 'move', id: macro.id }, 'success');
+        return { id: macro.id, name: macro.name, folder: macro.folder?.name ?? null };
+      }
+
+      case 'delete': {
+        const resolved: Array<{ id: string; name: string }> = [];
+        const missing: string[] = [];
+        for (const id of params.ids ?? []) {
+          const macro = (game as any).macros?.get(id);
+          if (macro) resolved.push({ id: macro.id, name: macro.name });
+          else missing.push(id);
+        }
+        if (missing.length > 0) {
+          throw new Error(
+            `Macro id(s) not found: ${missing.join(', ')}. Nothing was deleted — ` +
+              `use action:"list" to get valid ids.`
+          );
+        }
+        if (resolved.length === 0) throw new Error('No macro ids were given');
+
+        await MacroCls.deleteDocuments(resolved.map(r => r.id));
+        const survivors = resolved.filter(r => (game as any).macros?.get(r.id));
+        if (survivors.length > 0) {
+          throw new Error(
+            `Foundry reported success but these macros still exist: ${survivors
+              .map(s => `${s.name} (${s.id})`)
+              .join(', ')}`
+          );
+        }
+        this.auditLog('manageMacros', { action: 'delete', count: resolved.length }, 'success');
+        return { deleted: resolved, total: resolved.length };
+      }
+
+      case 'execute': {
+        const macro = this.resolveMacro(params.id!);
+        if (!macro) throw new Error(`Macro not found: "${params.id}"`);
+
+        let result: any;
+        try {
+          result = await macro.execute();
+        } catch (error) {
+          this.auditLog(
+            'manageMacros',
+            { action: 'execute', id: macro.id },
+            'failure',
+            error instanceof Error ? error.message : String(error)
+          );
+          throw new Error(
+            `Macro "${macro.name}" threw while executing: ` +
+              `${error instanceof Error ? error.message : String(error)}`
+          );
+        }
+
+        // Script results can be anything; make them transportable.
+        let serialized: any = null;
+        if (result !== undefined && result !== null) {
+          if (typeof result === 'object') {
+            try {
+              serialized = this.sanitizeData(result);
+            } catch {
+              serialized = String(result);
+            }
+          } else {
+            serialized = result;
+          }
+        }
+
+        this.auditLog('manageMacros', { action: 'execute', id: macro.id }, 'success');
+        return {
+          executed: true,
+          id: macro.id,
+          name: macro.name,
+          type: macro.type,
+          command: macro.command ?? '',
+          result: serialized,
+        };
+      }
+
+      default:
+        throw new Error(`Unknown manage-macros action: "${(params as any).action}"`);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Images (manage-images): search / assign / svg-to-png
+  // ---------------------------------------------------------------------------
+
+  private static readonly IMAGE_EXTENSIONS = ['webp', 'png', 'jpg', 'jpeg', 'svg', 'gif'];
+
+  private filePicker(): any {
+    return (foundry as any).applications.apps.FilePicker.implementation;
+  }
+
+  /**
+   * Breadth-first filename search through a FilePicker source. Browse is
+   * per-directory, so this walks with hard caps (result count + directories
+   * scanned) — the PF2e icon tree alone holds thousands of files.
+   */
+  private async searchImageFiles(params: {
+    query?: string;
+    path?: string;
+    source?: string;
+    extensions?: string[];
+    maxResults?: number;
+  }): Promise<{ files: string[]; total: number; truncated: boolean; dirsScanned: number }> {
+    const source = params.source ?? 'data';
+    const root = (params.path ?? '').trim().replace(/^\/+|\/+$/g, '');
+    const exts = (params.extensions ?? FoundryDataAccess.IMAGE_EXTENSIONS).map(e =>
+      e.toLowerCase().replace(/^\./, '')
+    );
+    const cap = Math.min(params.maxResults ?? 50, 200);
+    const query = (params.query ?? '').toLowerCase();
+    const MAX_DIRS = 400;
+
+    const matches: string[] = [];
+    const queue: string[] = [root];
+    const visited = new Set<string>();
+    let dirsScanned = 0;
+    let browseFailures = 0;
+
+    while (queue.length > 0 && matches.length < cap && dirsScanned < MAX_DIRS) {
+      const dir = queue.shift()!;
+      if (visited.has(dir)) continue;
+      visited.add(dir);
+      dirsScanned++;
+
+      let listing: any;
+      try {
+        listing = await this.filePicker().browse(source, dir);
+      } catch {
+        browseFailures++;
+        continue;
+      }
+
+      for (const file of listing.files ?? []) {
+        const base = decodeURIComponent(String(file).split('/').pop() ?? '').toLowerCase();
+        const ext = base.includes('.') ? base.split('.').pop()! : '';
+        if (!exts.includes(ext)) continue;
+        if (query && !base.includes(query)) continue;
+        matches.push(file);
+        if (matches.length >= cap) break;
+      }
+      for (const sub of listing.dirs ?? []) queue.push(String(sub));
+    }
+
+    if (matches.length === 0 && dirsScanned <= 1 && browseFailures > 0) {
+      throw new Error(
+        `Could not browse "${root || '(root)'}" in source "${source}" — the directory may not exist.`
+      );
+    }
+
+    return {
+      files: matches,
+      total: matches.length,
+      truncated: matches.length >= cap || dirsScanned >= MAX_DIRS,
+      dirsScanned,
+    };
+  }
+
+  /** Throw unless `path` exists in the 'data' or 'public' file sources. */
+  private async verifyImageFileExists(path: string): Promise<void> {
+    const clean = path.split('?')[0];
+    const dir = clean.includes('/') ? clean.slice(0, clean.lastIndexOf('/')) : '';
+    const base = decodeURIComponent(clean.split('/').pop() ?? '');
+    for (const source of ['data', 'public']) {
+      try {
+        const listing = await this.filePicker().browse(source, dir);
+        const found = (listing.files ?? []).some(
+          (f: string) => decodeURIComponent(String(f).split('/').pop() ?? '') === base
+        );
+        if (found) return;
+      } catch {
+        /* directory absent in this source — try the next */
+      }
+    }
+    throw new Error(
+      `Image not found on the server: "${path}". Use manage-images action:"search" to find ` +
+        `a valid path — nothing was assigned.`
+    );
+  }
+
+  /** Point an actor portrait / prototype token / item at an existing image. */
+  private async assignImageTo(
+    imagePath: string,
+    target: {
+      targetType: 'actor' | 'item';
+      actorIdentifier?: string;
+      itemId?: string;
+      scope?: 'portrait' | 'token' | 'both';
+    }
+  ): Promise<{ assigned: Record<string, any> }> {
+    const isUrl = /^(https?:)?\/\//i.test(imagePath);
+    if (!isUrl) await this.verifyImageFileExists(imagePath);
+
+    if (target.targetType === 'actor') {
+      if (!target.actorIdentifier) {
+        throw new Error('targetType "actor" requires "actorIdentifier"');
+      }
+      const actor = this.findActorByIdentifier(target.actorIdentifier);
+      if (!actor) throw new Error(`Actor not found: ${target.actorIdentifier}`);
+
+      const scope = target.scope ?? 'both';
+      const patch: Record<string, any> = {};
+      if (scope === 'portrait' || scope === 'both') patch.img = imagePath;
+      if (scope === 'token' || scope === 'both') {
+        patch.prototypeToken = { texture: { src: imagePath } };
+      }
+      await actor.update(patch);
+
+      this.auditLog('manageImages', { action: 'assign', actor: actor.name, scope }, 'success');
+      return {
+        assigned: { type: 'actor', id: actor.id, name: actor.name, scope, imagePath },
+      };
+    }
+
+    // targetType === 'item'
+    if (!target.itemId) throw new Error('targetType "item" requires "itemId"');
+
+    if (target.actorIdentifier) {
+      const actor = this.findActorByIdentifier(target.actorIdentifier);
+      if (!actor) throw new Error(`Actor not found: ${target.actorIdentifier}`);
+      const item =
+        actor.items.get(target.itemId) ??
+        actor.items.find((i: any) => i.name?.toLowerCase() === target.itemId!.toLowerCase());
+      if (!item) {
+        throw new Error(`Item "${target.itemId}" not found on actor "${actor.name}"`);
+      }
+      await item.update({ img: imagePath });
+      this.auditLog(
+        'manageImages',
+        { action: 'assign', actor: actor.name, item: item.name },
+        'success'
+      );
+      return {
+        assigned: {
+          type: 'actor-item',
+          id: item.id,
+          name: item.name,
+          actor: actor.name,
+          imagePath,
+        },
+      };
+    }
+
+    const items = (game as any).items;
+    const item =
+      items?.get(target.itemId) ??
+      items?.find((i: any) => i.name?.toLowerCase() === target.itemId!.toLowerCase());
+    if (!item) {
+      throw new Error(
+        `World item "${target.itemId}" not found. For an item on an actor, also pass "actorIdentifier".`
+      );
+    }
+    await item.update({ img: imagePath });
+    this.auditLog('manageImages', { action: 'assign', item: item.name }, 'success');
+    return { assigned: { type: 'item', id: item.id, name: item.name, imagePath } };
+  }
+
+  /** Rasterise SVG markup to PNG via a canvas and upload it into the data directory. */
+  private async svgToPng(params: {
+    svg?: string;
+    svgPath?: string;
+    filename?: string;
+    destination?: string;
+    width?: number;
+    height?: number;
+    assignTo?: {
+      targetType: 'actor' | 'item';
+      actorIdentifier?: string;
+      itemId?: string;
+      scope?: 'portrait' | 'token' | 'both';
+    };
+  }): Promise<any> {
+    let markup = params.svg;
+    if (!markup && params.svgPath) {
+      await this.verifyImageFileExists(params.svgPath);
+      const response = await fetch(params.svgPath);
+      if (!response.ok) {
+        throw new Error(`Could not read "${params.svgPath}": HTTP ${response.status}`);
+      }
+      markup = await response.text();
+    }
+    if (!markup?.trim()) throw new Error('Provide "svg" markup or an existing "svgPath"');
+    if (!/<svg[\s>]/i.test(markup)) {
+      throw new Error('The provided markup has no <svg> tag — it is not SVG.');
+    }
+
+    const rawName = (params.filename ?? '').trim().split('/').pop() ?? '';
+    if (!rawName) throw new Error('"filename" is required, e.g. "clownkin-jester.png"');
+    const filename = /\.png$/i.test(rawName) ? rawName : `${rawName}.png`;
+
+    const blobUrl = URL.createObjectURL(new Blob([markup], { type: 'image/svg+xml' }));
+    let pngBlob: Blob | null = null;
+    let width = params.width ?? 0;
+    let height = params.height ?? 0;
+    try {
+      const image = new Image();
+      await new Promise<void>((resolve, reject) => {
+        image.onload = () => resolve();
+        image.onerror = () =>
+          reject(
+            new Error(
+              'The SVG could not be rasterised — check that the markup is valid, ' +
+                'self-contained SVG (no external references).'
+            )
+          );
+        image.src = blobUrl;
+      });
+
+      const naturalW = image.naturalWidth || 0;
+      const naturalH = image.naturalHeight || 0;
+      if (!width && !height) {
+        width = naturalW || 512;
+        height = naturalH || 512;
+      } else if (width && !height) {
+        height = naturalW > 0 ? Math.round((width * naturalH) / naturalW) : width;
+      } else if (!width && height) {
+        width = naturalH > 0 ? Math.round((height * naturalW) / naturalH) : height;
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('Could not get a 2d canvas context in the Foundry client');
+      ctx.drawImage(image, 0, 0, width, height);
+
+      pngBlob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'));
+    } finally {
+      URL.revokeObjectURL(blobUrl);
+    }
+    if (!pngBlob) throw new Error('Canvas produced no PNG data');
+
+    // Ensure the destination directory chain exists; upload fails loudly if not.
+    const destination = (params.destination ?? 'foundry-mcp-assets').replace(/^\/+|\/+$/g, '');
+    const segments = destination.split('/').filter(s => s.length > 0);
+    let partial = '';
+    for (const segment of segments) {
+      partial = partial ? `${partial}/${segment}` : segment;
+      try {
+        await this.filePicker().createDirectory('data', partial);
+      } catch {
+        /* already exists */
+      }
+    }
+
+    const file = new File([pngBlob], filename, { type: 'image/png' });
+    const uploaded = await this.filePicker().upload(
+      'data',
+      destination,
+      file,
+      {},
+      { notify: false }
+    );
+    const path = uploaded?.path ?? `${destination}/${filename}`;
+    if (!uploaded) throw new Error('Foundry rejected the PNG upload');
+
+    this.auditLog('manageImages', { action: 'svg-to-png', path, width, height }, 'success');
+
+    const warnings: string[] = [];
+    let assigned: Record<string, any> | null = null;
+    if (params.assignTo) {
+      try {
+        assigned = (await this.assignImageTo(path, params.assignTo)).assigned;
+      } catch (error) {
+        warnings.push(
+          `The PNG was uploaded to "${path}" but could not be assigned: ` +
+            `${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    return {
+      path,
+      width,
+      height,
+      assigned,
+      ...(warnings.length ? { warnings } : {}),
+    };
+  }
+
+  async manageImages(params: {
+    action: 'search' | 'assign' | 'svg-to-png';
+    query?: string;
+    path?: string;
+    source?: string;
+    extensions?: string[];
+    maxResults?: number;
+    imagePath?: string;
+    targetType?: 'actor' | 'item';
+    actorIdentifier?: string;
+    itemId?: string;
+    scope?: 'portrait' | 'token' | 'both';
+    svg?: string;
+    svgPath?: string;
+    filename?: string;
+    destination?: string;
+    width?: number;
+    height?: number;
+    assignTo?: {
+      targetType: 'actor' | 'item';
+      actorIdentifier?: string;
+      itemId?: string;
+      scope?: 'portrait' | 'token' | 'both';
+    };
+  }): Promise<any> {
+    this.validateFoundryState();
+
+    switch (params.action) {
+      case 'search':
+        return await this.searchImageFiles(params);
+
+      case 'assign': {
+        if (!params.imagePath?.trim()) throw new Error('"imagePath" is required');
+        if (!params.targetType) throw new Error('"targetType" is required ("actor" or "item")');
+        return await this.assignImageTo(params.imagePath.trim(), {
+          targetType: params.targetType,
+          ...(params.actorIdentifier ? { actorIdentifier: params.actorIdentifier } : {}),
+          ...(params.itemId ? { itemId: params.itemId } : {}),
+          ...(params.scope ? { scope: params.scope } : {}),
+        });
+      }
+
+      case 'svg-to-png':
+        return await this.svgToPng(params);
+
+      default:
+        throw new Error(`Unknown manage-images action: "${(params as any).action}"`);
+    }
+  }
+
   // ─── mgt2e ──────────────────────────────────────────────────────────────────
 }
 
@@ -11777,7 +12612,9 @@ function findWorldAncestryItem(ref: string): any {
   return Array.from((game as any).items ?? []).find(
     (i: any) =>
       i.type === 'ancestry' &&
-      (i.id === needle || i.name?.toLowerCase() === needle.toLowerCase() || i.system?.slug === bySlug)
+      (i.id === needle ||
+        i.name?.toLowerCase() === needle.toLowerCase() ||
+        i.system?.slug === bySlug)
   );
 }
 
@@ -11924,10 +12761,7 @@ function applyPf2eAbcParams(
       // FeatGroup#insertFeat). Without it, FeatGroup#assignFeat always falls
       // through to Bonus Feats regardless of category — every homebrew feat
       // landed there silently.
-      if (
-        SLOTTED_FEAT_CATEGORIES.has(system.category) &&
-        typeof system.level?.value === 'number'
-      ) {
+      if (SLOTTED_FEAT_CATEGORIES.has(system.category) && typeof system.level?.value === 'number') {
         system.location = `${system.category}-${system.level.value}`;
       }
       break;

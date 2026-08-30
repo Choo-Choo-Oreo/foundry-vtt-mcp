@@ -140,6 +140,11 @@ export class QueryHandlers {
     CONFIG.queries[`${modulePrefix}.sendChatMessage`] = this.handleSendChatMessage.bind(this);
     CONFIG.queries[`${modulePrefix}.rollDice`] = this.handleRollDice.bind(this);
 
+    // Roll tables, macros, images
+    CONFIG.queries[`${modulePrefix}.manageRollTables`] = this.handleManageRollTables.bind(this);
+    CONFIG.queries[`${modulePrefix}.manageMacros`] = this.handleManageMacros.bind(this);
+    CONFIG.queries[`${modulePrefix}.manageImages`] = this.handleManageImages.bind(this);
+
     // Phase 7: Token manipulation queries
     CONFIG.queries[`${modulePrefix}.move-token`] = this.handleMoveToken.bind(this);
     CONFIG.queries[`${modulePrefix}.update-token`] = this.handleUpdateToken.bind(this);
@@ -2262,6 +2267,63 @@ export class QueryHandlers {
     } catch (error) {
       throw new Error(
         `Failed to roll dice: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  private async handleManageRollTables(data: { action: string; [k: string]: any }): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      this.dataAccess.validateFoundryState();
+
+      if (!data?.action) throw new Error('action is required');
+
+      return await this.dataAccess.manageRollTables(data as any);
+    } catch (error) {
+      throw new Error(
+        `Failed to manage roll tables: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  private async handleManageMacros(data: { action: string; [k: string]: any }): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      this.dataAccess.validateFoundryState();
+
+      if (!data?.action) throw new Error('action is required');
+
+      return await this.dataAccess.manageMacros(data as any);
+    } catch (error) {
+      throw new Error(
+        `Failed to manage macros: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  private async handleManageImages(data: { action: string; [k: string]: any }): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      this.dataAccess.validateFoundryState();
+
+      if (!data?.action) throw new Error('action is required');
+
+      return await this.dataAccess.manageImages(data as any);
+    } catch (error) {
+      throw new Error(
+        `Failed to manage images: ${error instanceof Error ? error.message : 'Unknown error'}`
       );
     }
   }
