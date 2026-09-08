@@ -165,6 +165,25 @@ const BUILTIN_CONSTRAINTS: Array<{ title: string; body: string }> = [
       'offers. If queries fail with an access error, check that the browser session running ' +
       'the bridge is logged in as a GM — not that the tool is broken.',
   },
+  {
+    title: 'Exactly one tool is irreversible, and it is built inside out',
+    body:
+      'Deleting documents puts them somewhere a person can still get at — Foundry keeps the ' +
+      'world file, and an item deleted from an actor still exists in the world. ' +
+      '`delete-compendium-pack` is the one call with nothing behind it: the pack and every ' +
+      'entry in it are gone. So it is the one tool whose DEFAULT does nothing. Called with ' +
+      'just `pack`, it reports and deletes nothing; deleting takes a second call with ' +
+      '`dryRun`:false and `expectedEntryCount` matching what the first call reported.\n' +
+      'These are speed bumps, not locks, and that is deliberate. A guard that cannot be ' +
+      'satisfied gets routed around — the pack gets deleted from the Foundry sidebar ' +
+      'instead, where nothing is logged at all. Every check here is satisfiable by a caller ' +
+      'who has looked at the pack and unsatisfiable by one who has not. A bare `confirm`:true ' +
+      'flag would be neither: the model sets it, so it protects nobody. The consent that ' +
+      'matters is the user naming the pack, not a boolean.\n' +
+      "The single absolute refusal is system and module packs, and it is not this bridge's " +
+      'rule: `deleteCompendium` belongs to the owning package and Foundry rejects it for ' +
+      'anything but `world.*`. Refusing early just turns an exception into a sentence.',
+  },
 ];
 
 /**
@@ -254,6 +273,56 @@ const BUILTIN_RECIPES: NoteRecipe[] = [
         'whole pack means one call per entry.',
     ],
   },
+  {
+    id: 'delete-a-compendium-pack',
+    title: 'Delete a world compendium pack',
+    when: 'A pack is genuinely unwanted — scratch output, a bad export, a superseded pack.',
+    steps: [
+      'Confirm the user named this pack. Do not delete a pack on your own initiative because ' +
+        'it looks like test data; being sure it is scratch is exactly the state in which ' +
+        'people delete the wrong thing.',
+      'If the content might be wanted, export it FIRST — `export-world-data` for JSON on ' +
+        'disk. Nothing in the delete path takes a backup, and there is no undo.',
+      'Call `delete-compendium-pack` with just `pack`. This is a dry run by default: it ' +
+        "deletes nothing and returns the pack's type, lock state, entry count and entry names.",
+      'Show the user that report — pack id and entry count — and get their word before ' +
+        'going further.',
+      'Call again with `dryRun`:false and `expectedEntryCount` set to the count from the dry ' +
+        'run. A mismatch aborts and deletes nothing; that means the pack changed under you or ' +
+        'it is not the pack you thought.',
+      'Check `verified` in the response. It re-reads `game.packs` after the delete rather than ' +
+        'trusting the call, so it can say FAILED even when no error was thrown.',
+    ],
+    notes:
+      'Only `world.*` packs. System and module packs (pf2e.*, any module) are refused, and ' +
+      'Foundry would refuse them too — to stop using that content, disable the module. The ' +
+      'entry list in the response is a receipt of what was destroyed, not a copy of it.',
+  },
+  {
+    id: 'change-content-instead-of-deleting',
+    title: 'Change or edit existing content',
+    when:
+      'The usual case. Deleting and recreating loses ids, ownership and links; editing ' +
+      'does not.',
+    steps: [
+      'World Items — `manage-world-items` action:"update" with `updates`: each patch needs ' +
+        '`id` plus the fields to change. Merges into the stored document, so an unmentioned ' +
+        'field is left alone rather than blanked.',
+      'Actors — `manage-actors` action:"update". For items ON an actor use ' +
+        '"update-items" / "delete-items"; deleting an actor\'s copy does not touch the world ' +
+        'item it came from.',
+      'Journals — `replace-journal-page` for page content. `manage-journals` only deletes.',
+      'Read the change back before reporting it — `manage-world-items` action:"get", or ' +
+        '`get-character` with `raw`:true, which exposes stored `_source` fields the curated ' +
+        'view hides. A success response is not evidence the field you meant actually moved.',
+      'Ids are the safe handle everywhere. Names collide, silently, and nothing warns you.',
+    ],
+    notes:
+      'There is no edit path for entries already inside a compendium pack. Changing packed ' +
+      'content means editing the world documents and re-running `export-to-compendium` with ' +
+      '`updateByName`:true — without that flag a re-run appends duplicates rather than ' +
+      'updating.',
+  },
 ];
 
 /**
@@ -276,6 +345,10 @@ const BUILTIN_TOOL_NOTES: Record<string, string> = {
     'Writes a real Foundry pack from a world folder. Use `updateByName` on re-runs or entries ' +
     'duplicate.',
   'get-world-info': 'Cheapest way to learn the game system and version before branching on it.',
+  'delete-compendium-pack':
+    'The only irreversible tool here. Dry run by default — one call reports, a second with ' +
+    '`dryRun`:false and a matching `expectedEntryCount` deletes. World packs only; system and ' +
+    'module packs are refused. Takes no backup. See the "delete-a-compendium-pack" recipe.',
 };
 
 export class DocumentationTools {

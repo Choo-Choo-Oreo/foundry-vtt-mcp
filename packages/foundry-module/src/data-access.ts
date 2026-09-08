@@ -5483,6 +5483,161 @@ export class FoundryDataAccess {
   }
 
   /**
+   * Delete a whole world compendium pack, entries and all.
+   *
+   * The only irreversible operation in this module, so it is built the opposite way
+   * round from the rest: the default call deletes nothing. `dryRun` defaults to TRUE,
+   * so the first call is always a report of what is in the pack, and a second call
+   * carrying `dryRun: false` and the entry count it just saw is what actually deletes.
+   *
+   * That is a speed bump, not a lock, and deliberately so. A gate that cannot be
+   * satisfied gets routed around - somebody deletes the pack from the Foundry sidebar
+   * instead, where nothing is recorded at all. What this buys is that nobody deletes a
+   * pack they have not looked inside, and the count check catches the case that
+   * actually costs you something: being confident about the wrong pack.
+   *
+   * The one refusal that is absolute is system and module packs. That is not a rule
+   * this module invented - `deleteCompendium` belongs to the owning package, and
+   * Foundry rejects it for anything but a world pack. Refusing here just produces a
+   * sentence instead of an exception. A typical world carries a hundred-odd packs from
+   * its game system and its modules; none of them are ours to remove.
+   *
+   * The index entry list is returned in both modes, so a delete hands back the receipt
+   * of what it destroyed. That is not a backup - the entries themselves are gone and
+   * nothing here writes them to disk first. Deliberately: reading a large pack's full
+   * documents would blow the 10s query ceiling, and a backup step that times out on
+   * exactly the big packs that need it is worse than an honest "no backup taken".
+   * Use export-world-data or export-to-compendium beforehand if the content matters.
+   */
+  async deleteCompendiumPack(params: {
+    pack: string;
+    dryRun?: boolean;
+    expectedEntryCount?: number;
+  }): Promise<any> {
+    this.validateFoundryState();
+
+    const raw = (params.pack ?? '').trim();
+    if (!raw) throw new Error('"pack" is required');
+
+    const packs = (game as any).packs;
+    // Bare name means a world pack; a dotted id is taken as given, so a system or
+    // module pack still RESOLVES here and gets the "not yours" answer below rather
+    // than a misleading "not found".
+    let pack = packs?.get?.(raw) ?? null;
+    if (!pack && !raw.includes('.')) pack = packs?.get?.(`world.${raw}`) ?? null;
+    if (!pack) {
+      const worldPacks: string[] = [];
+      for (const p of (packs ?? []) as Iterable<any>) {
+        if (p?.metadata?.packageType === 'world') worldPacks.push(p.collection);
+      }
+      throw new Error(
+        `Compendium not found: "${params.pack}". World packs in this world: ` +
+          `${worldPacks.length ? worldPacks.join(', ') : '(none)'}.`
+      );
+    }
+
+    const collection = pack.collection ?? raw;
+    const packageType = pack.metadata?.packageType ?? 'unknown';
+    const packageName = pack.metadata?.packageName ?? pack.metadata?.package ?? 'unknown';
+
+    if (packageType !== 'world') {
+      throw new Error(
+        `Refusing to delete "${collection}": it belongs to the ${packageType} ` +
+          `"${packageName}", not to this world. Only world.* packs can be deleted, and ` +
+          `Foundry itself rejects the call for anything else. To stop using this content, ` +
+          `disable or uninstall the ${packageType} instead.`
+      );
+    }
+
+    // The index is what the sidebar shows and what everything downstream counts.
+    await pack.getIndex();
+    const index = Array.from((pack.index ?? []) as Iterable<any>);
+    const entryCount = index.length;
+    const ENTRY_CAP = 200;
+    const entries = index.slice(0, ENTRY_CAP).map((e: any) => ({
+      id: e._id ?? e.id,
+      name: e.name,
+      ...(e.type !== undefined ? { type: e.type } : {}),
+    }));
+
+    const summary = {
+      pack: collection,
+      label: pack.metadata?.label ?? collection,
+      documentName: pack.documentName,
+      packageType,
+      locked: pack.locked === true,
+      entryCount,
+      entries,
+      entriesTruncated: entryCount > ENTRY_CAP,
+    };
+
+    if (params.dryRun !== false) {
+      return {
+        success: true,
+        dryRun: true,
+        deleted: false,
+        ...summary,
+        note:
+          `Nothing was deleted. To delete this pack and all ${entryCount} entries, call again ` +
+          `with dryRun: false and expectedEntryCount: ${entryCount}. There is no undo and no ` +
+          `automatic backup - export first if the content matters.`,
+      };
+    }
+
+    if (typeof params.expectedEntryCount !== 'number') {
+      throw new Error(
+        `"expectedEntryCount" is required when dryRun is false. "${collection}" holds ` +
+          `${entryCount} entries right now; pass that number to confirm this is the pack you mean.`
+      );
+    }
+    if (params.expectedEntryCount !== entryCount) {
+      throw new Error(
+        `Entry count mismatch on "${collection}": you expected ${params.expectedEntryCount}, ` +
+          `the pack holds ${entryCount}. Nothing was deleted. Re-read the pack before ` +
+          `deleting - either this is not the pack you meant, or it changed since you looked.`
+      );
+    }
+
+    if (typeof pack.deleteCompendium !== 'function') {
+      throw new Error(
+        'CompendiumCollection#deleteCompendium is unavailable in this Foundry build.'
+      );
+    }
+
+    try {
+      await pack.deleteCompendium();
+    } catch (error) {
+      this.auditLog(
+        'deleteCompendiumPack',
+        { pack: collection, entryCount },
+        'failure',
+        error instanceof Error ? error.message : String(error)
+      );
+      throw error;
+    }
+
+    // Report what is true, not what was requested: confirm the pack is actually gone
+    // from game.packs rather than trusting the call to have done what it said.
+    const stillPresent = packs?.get?.(collection) != null;
+
+    this.auditLog('deleteCompendiumPack', { pack: collection, entryCount }, 'success');
+
+    return {
+      success: !stillPresent,
+      dryRun: false,
+      deleted: !stillPresent,
+      ...summary,
+      entriesDeleted: entryCount,
+      verified: stillPresent
+        ? 'FAILED - the pack is still registered in game.packs after deleteCompendium() returned.'
+        : 'Confirmed gone from game.packs.',
+      note:
+        `Deleted. The ${entryCount} entries listed above are not recoverable from here; the ` +
+        `list is a receipt, not a backup.`,
+    };
+  }
+
+  /**
    * Full stat-block read for standalone world Items — the whole stored document via
    * `toObject()`, `system` block included.
    *

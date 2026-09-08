@@ -133,6 +133,8 @@ export class QueryHandlers {
     CONFIG.queries[`${modulePrefix}.exportFolderTree`] = this.handleExportFolderTree.bind(this);
     CONFIG.queries[`${modulePrefix}.exportFolderToCompendium`] =
       this.handleExportFolderToCompendium.bind(this);
+    CONFIG.queries[`${modulePrefix}.deleteCompendiumPack`] =
+      this.handleDeleteCompendiumPack.bind(this);
     CONFIG.queries[`${modulePrefix}.updateWorldItems`] = this.handleUpdateWorldItems.bind(this);
     CONFIG.queries[`${modulePrefix}.deleteWorldItems`] = this.handleDeleteWorldItems.bind(this);
     CONFIG.queries[`${modulePrefix}.getSystemSchema`] = this.handleGetSystemSchema.bind(this);
@@ -1889,6 +1891,39 @@ export class QueryHandlers {
     } catch (error) {
       throw new Error(
         `Failed to export folder to compendium: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  /**
+   * Delete a world compendium pack. GM-only, and the only irreversible call in the
+   * bridge - so the default is a dry run and the caller has to say the entry count
+   * back before anything happens. Both guards live in dataAccess.deleteCompendiumPack;
+   * this layer only decides who is allowed to ask.
+   */
+  private async handleDeleteCompendiumPack(data: {
+    pack: string;
+    dryRun?: boolean;
+    expectedEntryCount?: number;
+  }): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      this.dataAccess.validateFoundryState();
+
+      return await this.dataAccess.deleteCompendiumPack({
+        pack: data.pack,
+        ...(data.dryRun !== undefined ? { dryRun: data.dryRun } : {}),
+        ...(data.expectedEntryCount !== undefined
+          ? { expectedEntryCount: data.expectedEntryCount }
+          : {}),
+      });
+    } catch (error) {
+      throw new Error(
+        `Failed to delete compendium pack: ${error instanceof Error ? error.message : 'Unknown error'}`
       );
     }
   }

@@ -30,6 +30,7 @@ import { ChatTools } from './tools/chat.js';
 import { RollTableManagementTools } from './tools/rolltable-management.js';
 import { MacroManagementTools } from './tools/macro-management.js';
 import { WorldExportTools } from './tools/world-export.js';
+import { CompendiumDeleteTools } from './tools/compendium-delete.js';
 import { DocumentationTools } from './tools/documentation.js';
 import { ImageManagementTools } from './tools/image-management.js';
 
@@ -1210,6 +1211,7 @@ async function startBackend(): Promise<void> {
   const rollTableManagementTools = new RollTableManagementTools({ foundryClient, logger });
   const macroManagementTools = new MacroManagementTools({ foundryClient, logger });
   const worldExportTools = new WorldExportTools({ foundryClient, logger });
+  const compendiumDeleteTools = new CompendiumDeleteTools({ foundryClient, logger });
   const documentationTools = new DocumentationTools({ foundryClient, logger });
   const imageManagementTools = new ImageManagementTools({ foundryClient, logger });
 
@@ -1448,6 +1450,7 @@ async function startBackend(): Promise<void> {
     ...rollTableManagementTools.getToolDefinitions(),
     ...macroManagementTools.getToolDefinitions(),
     ...worldExportTools.getToolDefinitions(),
+    ...compendiumDeleteTools.getToolDefinitions(),
     ...documentationTools.getToolDefinitions(),
     ...imageManagementTools.getToolDefinitions(),
 
@@ -1686,6 +1689,11 @@ async function startBackend(): Promise<void> {
 
                 case 'export-to-compendium':
                   result = await worldExportTools.handleExportToCompendium(args);
+
+                  break;
+
+                case 'delete-compendium-pack':
+                  result = await compendiumDeleteTools.handleDeleteCompendiumPack(args);
 
                   break;
 
