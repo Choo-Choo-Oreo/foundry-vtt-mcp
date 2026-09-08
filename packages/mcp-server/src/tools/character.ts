@@ -152,7 +152,13 @@ export class CharacterTools {
         description:
           'Manage Item documents in Foundry VTT. Specify the operation with "action":\n' +
           '- "create": Create world-level Items in the sidebar (not actor-attached). Good for reusable libraries. GM-only.\n' +
-          '- "list": List world-level Items with optional type/folder/name filters.\n' +
+          '- "list": List world-level Items with optional type/folder/name filters. Returns an ' +
+          'INDEX ONLY (id, name, type, folder path) — no `system` data. Use "get" for stat blocks.\n' +
+          '- "get": Full stat blocks. Returns each Item\u2019s complete stored document (the whole ' +
+          '`system` block, verbatim) for the ids in `ids`, or for everything matching the same ' +
+          'type/folder/nameFilter filters "list" takes. This is how to read what an item actually ' +
+          'does. Capped at 25 documents by default (raise with `maxDocuments`, max 200) because ' +
+          'these are large; to dump a whole content line to disk instead, use export-world-data.\n' +
           '- "update": Update existing world-level Items by ID. GM-only.\n' +
           '- "delete": Permanently delete world-level Items by ID (pass "ids"). This is the ONLY way to remove a standalone world Item; "remove-from-actor" only detaches items already on an actor. GM-only.\n' +
           '- "add-to-actor": Create and attach Items directly to an existing actor. GM-only.\n' +
@@ -169,6 +175,7 @@ export class CharacterTools {
               enum: [
                 'create',
                 'list',
+                'get',
                 'update',
                 'delete',
                 'add-to-actor',
@@ -176,7 +183,7 @@ export class CharacterTools {
                 'describe',
               ],
               description:
-                'Operation to perform: "create" world items, "list" world items, "update" world items by id, "delete" world items by id, "add-to-actor" to attach items to an actor, "remove-from-actor" to delete items from an actor, or "describe" to get system-specific enum reference (mgt2e: weapon traits, scales, armour forms, hardware systems, etc.).',
+                'Operation to perform: "create" world items, "list" world items (index only), "get" full stored documents for world items, "update" world items by id, "delete" world items by id, "add-to-actor" to attach items to an actor, "remove-from-actor" to delete items from an actor, or "describe" to get system-specific enum reference (mgt2e: weapon traits, scales, armour forms, hardware systems, etc.).',
             },
             ids: {
               type: 'array',
@@ -653,6 +660,64 @@ export class CharacterTools {
     }
   }
 
+  /**
+   * manage-world-items action:"get" — full stored documents for world Items.
+   *
+   * `list` is an index by design (cheap on a large world); this is the read path that
+   * actually returns `system` data. Returned verbatim from `toObject()` so nothing the
+   * game system stores is dropped on the way out.
+   */
+  async handleGetWorldItems(args: any): Promise<any> {
+    const schema = z
+      .object({
+        ids: z.array(z.string().min(1)).optional(),
+        type: z.string().optional(),
+        folder: z.string().optional(),
+        nameFilter: z.string().optional(),
+        maxDocuments: z.number().int().positive().max(200).optional(),
+      })
+      .refine(
+        v =>
+          (v.ids?.length ?? 0) > 0 ||
+          v.type !== undefined ||
+          v.folder !== undefined ||
+          v.nameFilter !== undefined,
+        {
+          message:
+            'action "get" needs either "ids" or at least one filter (type/folder/nameFilter). ' +
+            'Refusing to return every world Item unfiltered — use export-world-data for that.',
+        }
+      );
+
+    const params = schema.parse(args);
+
+    this.logger.info('Getting world items', {
+      ids: params.ids?.length ?? 0,
+      type: params.type ?? null,
+      folder: params.folder ?? null,
+      nameFilter: params.nameFilter ?? null,
+    });
+
+    try {
+      const result = await this.foundryClient.query('foundry-mcp-bridge.getWorldItems', {
+        ...(params.ids !== undefined ? { ids: params.ids } : {}),
+        ...(params.type !== undefined ? { type: params.type } : {}),
+        ...(params.folder !== undefined ? { folder: params.folder } : {}),
+        ...(params.nameFilter !== undefined ? { nameFilter: params.nameFilter } : {}),
+        ...(params.maxDocuments !== undefined ? { maxDocuments: params.maxDocuments } : {}),
+      });
+
+      this.logger.debug('Successfully got world items', { count: result?.total ?? 0 });
+
+      return result;
+    } catch (error) {
+      this.logger.error('Failed to get world items', error);
+      throw new Error(
+        `Failed to get world item(s): ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
   async handleCreateWorldItems(args: any): Promise<any> {
     const itemSchema = z.object({
       name: z.string().min(1, 'Item name cannot be empty'),
@@ -702,6 +767,7 @@ export class CharacterTools {
         action: z.enum([
           'create',
           'list',
+          'get',
           'update',
           'delete',
           'add-to-actor',
@@ -716,6 +782,8 @@ export class CharacterTools {
         return this.handleCreateWorldItems(args);
       case 'list':
         return this.handleListWorldItems(args);
+      case 'get':
+        return this.handleGetWorldItems(args);
       case 'update':
         return this.handleUpdateWorldItems(args);
       case 'delete':

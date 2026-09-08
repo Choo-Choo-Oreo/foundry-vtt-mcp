@@ -29,6 +29,7 @@ import { JournalManagementTools } from './tools/journal-management.js';
 import { ChatTools } from './tools/chat.js';
 import { RollTableManagementTools } from './tools/rolltable-management.js';
 import { MacroManagementTools } from './tools/macro-management.js';
+import { WorldExportTools } from './tools/world-export.js';
 import { ImageManagementTools } from './tools/image-management.js';
 
 import { QuestCreationTools } from './tools/quest-creation.js';
@@ -1207,6 +1208,7 @@ async function startBackend(): Promise<void> {
   const chatTools = new ChatTools({ foundryClient, logger });
   const rollTableManagementTools = new RollTableManagementTools({ foundryClient, logger });
   const macroManagementTools = new MacroManagementTools({ foundryClient, logger });
+  const worldExportTools = new WorldExportTools({ foundryClient, logger });
   const imageManagementTools = new ImageManagementTools({ foundryClient, logger });
 
   const dsa5CharacterCreator = new DSA5CharacterCreator({ foundryClient, logger });
@@ -1443,6 +1445,7 @@ async function startBackend(): Promise<void> {
     ...chatTools.getToolDefinitions(),
     ...rollTableManagementTools.getToolDefinitions(),
     ...macroManagementTools.getToolDefinitions(),
+    ...worldExportTools.getToolDefinitions(),
     ...imageManagementTools.getToolDefinitions(),
 
     ...dsa5CharacterCreator.getToolDefinitions(),
@@ -1665,6 +1668,17 @@ async function startBackend(): Promise<void> {
 
                 case 'manage-macros':
                   result = await macroManagementTools.handleManageMacros(args);
+
+                  break;
+
+                // World export: scrape Foundry content out to files on disk
+                case 'export-world-data':
+                  result = await worldExportTools.handleExportWorldData(args);
+
+                  break;
+
+                case 'export-to-compendium':
+                  result = await worldExportTools.handleExportToCompendium(args);
 
                   break;
 

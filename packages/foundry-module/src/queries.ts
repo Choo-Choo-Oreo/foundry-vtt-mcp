@@ -123,6 +123,16 @@ export class QueryHandlers {
     // World-level item CRUD
     CONFIG.queries[`${modulePrefix}.createWorldItems`] = this.handleCreateWorldItems.bind(this);
     CONFIG.queries[`${modulePrefix}.listWorldItems`] = this.handleListWorldItems.bind(this);
+    CONFIG.queries[`${modulePrefix}.getWorldItems`] = this.handleGetWorldItems.bind(this);
+
+    // Export surface: plan (index) -> fetch (bounded batches) -> folder tree, plus the
+    // compendium-pack path. Split because the query transport times out at 10s.
+    CONFIG.queries[`${modulePrefix}.exportPlan`] = this.handleExportPlan.bind(this);
+    CONFIG.queries[`${modulePrefix}.exportFetchDocuments`] =
+      this.handleExportFetchDocuments.bind(this);
+    CONFIG.queries[`${modulePrefix}.exportFolderTree`] = this.handleExportFolderTree.bind(this);
+    CONFIG.queries[`${modulePrefix}.exportFolderToCompendium`] =
+      this.handleExportFolderToCompendium.bind(this);
     CONFIG.queries[`${modulePrefix}.updateWorldItems`] = this.handleUpdateWorldItems.bind(this);
     CONFIG.queries[`${modulePrefix}.deleteWorldItems`] = this.handleDeleteWorldItems.bind(this);
     CONFIG.queries[`${modulePrefix}.getSystemSchema`] = this.handleGetSystemSchema.bind(this);
@@ -1743,6 +1753,142 @@ export class QueryHandlers {
     } catch (error) {
       throw new Error(
         `Failed to list world items: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  /**
+   * Full-document read for world Items. GM-gated like every other world-item path —
+   * a stored document can carry GM-only notes, so this is not a read a player gets.
+   */
+  private async handleGetWorldItems(data: {
+    ids?: string[];
+    type?: string;
+    folder?: string;
+    nameFilter?: string;
+    maxDocuments?: number;
+  }): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      this.dataAccess.validateFoundryState();
+
+      return await this.dataAccess.getWorldItems({
+        ...(data.ids !== undefined ? { ids: data.ids } : {}),
+        ...(data.type !== undefined ? { type: data.type } : {}),
+        ...(data.folder !== undefined ? { folder: data.folder } : {}),
+        ...(data.nameFilter !== undefined ? { nameFilter: data.nameFilter } : {}),
+        ...(data.maxDocuments !== undefined ? { maxDocuments: data.maxDocuments } : {}),
+      });
+    } catch (error) {
+      throw new Error(
+        `Failed to get world items: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  /**
+   * Export queries. GM-gated like every other world-wide read: a stored document can
+   * carry GM-only notes, and an export is the broadest read the bridge offers.
+   */
+  private async handleExportPlan(data: {
+    classes?: string[];
+    type?: string;
+    folder?: string;
+    nameFilter?: string;
+    ids?: string[];
+  }): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      this.dataAccess.validateFoundryState();
+
+      return await this.dataAccess.exportPlan({
+        ...(data.classes !== undefined ? { classes: data.classes } : {}),
+        ...(data.type !== undefined ? { type: data.type } : {}),
+        ...(data.folder !== undefined ? { folder: data.folder } : {}),
+        ...(data.nameFilter !== undefined ? { nameFilter: data.nameFilter } : {}),
+        ...(data.ids !== undefined ? { ids: data.ids } : {}),
+      });
+    } catch (error) {
+      throw new Error(
+        `Failed to plan export: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  private async handleExportFetchDocuments(data: {
+    documentClass: string;
+    ids: string[];
+  }): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      this.dataAccess.validateFoundryState();
+
+      return await this.dataAccess.exportFetchDocuments({
+        documentClass: data.documentClass,
+        ids: data.ids,
+      });
+    } catch (error) {
+      throw new Error(
+        `Failed to fetch export batch: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  private async handleExportFolderTree(data: { classes?: string[] }): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      this.dataAccess.validateFoundryState();
+
+      return await this.dataAccess.exportFolderTree({
+        ...(data.classes !== undefined ? { classes: data.classes } : {}),
+      });
+    } catch (error) {
+      throw new Error(
+        `Failed to read folder tree: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  private async handleExportFolderToCompendium(data: {
+    folder: string;
+    packLabel?: string;
+    packName?: string;
+    updateByName?: boolean;
+  }): Promise<any> {
+    try {
+      // Creates and writes a world compendium — GM-only, and a write, not a read.
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      this.dataAccess.validateFoundryState();
+
+      return await this.dataAccess.exportFolderToCompendium({
+        folder: data.folder,
+        ...(data.packLabel !== undefined ? { packLabel: data.packLabel } : {}),
+        ...(data.packName !== undefined ? { packName: data.packName } : {}),
+        ...(data.updateByName !== undefined ? { updateByName: data.updateByName } : {}),
+      });
+    } catch (error) {
+      throw new Error(
+        `Failed to export folder to compendium: ${error instanceof Error ? error.message : 'Unknown error'}`
       );
     }
   }

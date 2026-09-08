@@ -5088,6 +5088,7 @@ export class FoundryDataAccess {
       img?: string;
       folderId: string | null;
       folderName: string | null;
+      folderPath: string;
     }>
   > {
     this.validateFoundryState();
@@ -5120,6 +5121,7 @@ export class FoundryDataAccess {
       img?: string;
       folderId: string | null;
       folderName: string | null;
+      folderPath: string;
     }> = [];
 
     for (const item of (game as any).items) {
@@ -5134,10 +5136,428 @@ export class FoundryDataAccess {
         ...(item.img ? { img: item.img } : {}),
         folderId: item.folder?.id ?? null,
         folderName: item.folder?.name ?? null,
+        folderPath: this.folderPathOf(item.folder),
       });
     }
 
     return result;
+  }
+
+  /**
+   * The world collection backing each exportable document class.
+   *
+   * A method rather than a module constant because `game` is only populated after
+   * Foundry's ready hook — a top-level constant would capture undefined.
+   */
+  private exportCollections(): Record<string, any> {
+    const g = game as any;
+    return {
+      Item: g.items,
+      Actor: g.actors,
+      JournalEntry: g.journal,
+      Macro: g.macros,
+      RollTable: g.tables,
+      Scene: g.scenes,
+    };
+  }
+
+  /**
+   * Phase 1 of an export: the plan.
+   *
+   * Returns an index only — id, name, subtype, folder path — for every document
+   * matching the filters, across the requested classes. Deliberately small: the MCP
+   * query transport has a hard 10s timeout, so the caller uses this to learn what
+   * exists and then pulls the documents themselves in bounded batches via
+   * `exportFetchDocuments`.
+   *
+   * Filters stack (all must pass). `folder` is a PREFIX match on the "/"-separated
+   * path, so "Homebrew/Classes" catches everything nested beneath it — the useful
+   * semantic for an export, and different on purpose from listWorldItems, which
+   * matches a folder by leaf name only.
+   */
+  async exportPlan(params: {
+    classes?: string[];
+    type?: string;
+    folder?: string;
+    nameFilter?: string;
+    ids?: string[];
+  }): Promise<{
+    world: { id: string; title: string; system: string; systemVersion: string; foundry: string };
+    entries: Record<string, Array<{ id: string; name: string; type: string; folderPath: string }>>;
+    counts: Record<string, number>;
+    total: number;
+    skipped: string[];
+  }> {
+    this.validateFoundryState();
+
+    const collections = this.exportCollections();
+    const known = Object.keys(collections);
+    const requested = params.classes && params.classes.length > 0 ? params.classes : known.slice();
+
+    const unknown = requested.filter(c => !known.includes(c));
+    if (unknown.length > 0) {
+      throw new Error(
+        `Unknown document class(es): ${unknown.join(', ')}. Known: ${known.join(', ')}.`
+      );
+    }
+
+    const nameLower = params.nameFilter ? params.nameFilter.toLowerCase() : null;
+    const folderFilter = params.folder
+      ? params.folder.trim().replace(/^\/+/, '').replace(/\/+$/, '')
+      : null;
+    const folderLower = folderFilter ? folderFilter.toLowerCase() : null;
+    const idSet = params.ids && params.ids.length > 0 ? new Set(params.ids) : null;
+
+    const entries: Record<string, Array<any>> = {};
+    const counts: Record<string, number> = {};
+    const skipped: string[] = [];
+    let total = 0;
+
+    for (const cls of requested) {
+      const collection = collections[cls];
+      if (!collection) {
+        // A world can legitimately lack a collection, or Foundry may rename one
+        // across majors. Record it rather than throwing the whole export away.
+        skipped.push(`${cls}: collection unavailable in this Foundry build`);
+        continue;
+      }
+
+      const matched: Array<any> = [];
+      for (const doc of collection as Iterable<any>) {
+        if (idSet && !idSet.has(doc.id)) continue;
+        if (params.type && doc.type !== params.type) continue;
+        if (nameLower && !(doc.name ?? '').toLowerCase().includes(nameLower)) continue;
+
+        const folderPath = this.folderPathOf(doc.folder);
+        if (folderLower !== null) {
+          const pathLower = folderPath.toLowerCase();
+          const isMatch =
+            pathLower === folderLower ||
+            pathLower.startsWith(`${folderLower}/`) ||
+            doc.folder?.id === folderFilter;
+          if (!isMatch) continue;
+        }
+
+        matched.push({
+          id: doc.id,
+          name: doc.name ?? '',
+          // Scenes and journals have no `type`; report the class instead so the
+          // caller always has something to group by.
+          type: doc.type ?? cls,
+          folderPath,
+        });
+      }
+
+      entries[cls] = matched;
+      counts[cls] = matched.length;
+      total += matched.length;
+    }
+
+    const g = game as any;
+    return {
+      world: {
+        id: g.world?.id ?? 'unknown',
+        title: g.world?.title ?? 'unknown',
+        system: g.system?.id ?? 'unknown',
+        systemVersion: g.system?.version ?? 'unknown',
+        foundry: g.version ?? g.data?.version ?? 'unknown',
+      },
+      entries,
+      counts,
+      total,
+      skipped,
+    };
+  }
+
+  /**
+   * Phase 2 of an export: pull one bounded batch of full documents.
+   *
+   * `toObject()` verbatim — no curation. A curated shape goes stale every time the
+   * game system moves a field and silently drops whatever it does not know about;
+   * the caller can always narrow, but cannot recover what was never sent.
+   *
+   * The batch is capped because the transport times out at 10s and these documents
+   * are large (a Scene carries every token, wall, light and tile it contains). An
+   * over-large batch fails here with a clear message rather than as a timeout.
+   */
+  async exportFetchDocuments(params: { documentClass: string; ids: string[] }): Promise<{
+    documentClass: string;
+    documents: any[];
+    failed: Array<{ id: string; error: string }>;
+  }> {
+    this.validateFoundryState();
+
+    const collections = this.exportCollections();
+    const collection = collections[params.documentClass];
+    if (!collection) {
+      throw new Error(
+        `Unknown document class: ${params.documentClass}. ` +
+          `Known: ${Object.keys(collections).join(', ')}.`
+      );
+    }
+
+    if (!Array.isArray(params.ids) || params.ids.length === 0) {
+      throw new Error('exportFetchDocuments requires a non-empty "ids" array');
+    }
+    if (params.ids.length > 100) {
+      throw new Error(
+        `Batch of ${params.ids.length} exceeds the 100-document ceiling; the query ` +
+          `transport times out at 10s. Send smaller batches.`
+      );
+    }
+
+    const documents: any[] = [];
+    const failed: Array<{ id: string; error: string }> = [];
+
+    for (const id of params.ids) {
+      try {
+        const doc = collection.get?.(id);
+        if (!doc) {
+          failed.push({ id, error: 'not found' });
+          continue;
+        }
+        documents.push({
+          id: doc.id,
+          name: doc.name ?? '',
+          type: doc.type ?? params.documentClass,
+          folderPath: this.folderPathOf(doc.folder),
+          document: doc.toObject(),
+        });
+      } catch (error) {
+        // One unserialisable document must not lose the other 99 in the batch.
+        failed.push({ id, error: error instanceof Error ? error.message : 'unknown error' });
+      }
+    }
+
+    return { documentClass: params.documentClass, documents, failed };
+  }
+
+  /**
+   * The world's folder tree for the requested classes, as flat records carrying
+   * "/"-separated paths. Exported alongside the documents so an EMPTY folder — real
+   * organisational information — survives a round trip that only carried documents.
+   */
+  async exportFolderTree(params: {
+    classes?: string[];
+  }): Promise<Array<{ id: string; name: string; type: string; path: string; depth: number }>> {
+    this.validateFoundryState();
+
+    const known = Object.keys(this.exportCollections());
+    const requested = params.classes && params.classes.length > 0 ? params.classes : known.slice();
+    const wanted = new Set(requested);
+
+    const out: Array<{ id: string; name: string; type: string; path: string; depth: number }> = [];
+    for (const folder of ((game as any).folders ?? []) as Iterable<any>) {
+      if (!wanted.has(folder.type)) continue;
+      const path = this.folderPathOf(folder);
+      out.push({
+        id: folder.id,
+        name: folder.name ?? '',
+        type: folder.type,
+        path,
+        depth: path ? path.split('/').length : 0,
+      });
+    }
+    out.sort((a, b) => a.type.localeCompare(b.type) || a.path.localeCompare(b.path));
+    return out;
+  }
+
+  /**
+   * Export the contents of a world folder into a Foundry compendium pack.
+   *
+   * The JSON export writes files a human can read but Foundry cannot import without
+   * a script; this writes a real pack the world can use directly. Both are useful and
+   * neither replaces the other.
+   *
+   * Uses core Foundry's own `Folder#exportToCompendium`, so the packing rules stay
+   * Foundry's rather than something reimplemented here.
+   */
+  async exportFolderToCompendium(params: {
+    folder: string;
+    packLabel?: string;
+    packName?: string;
+    updateByName?: boolean;
+  }): Promise<any> {
+    this.validateFoundryState();
+
+    const raw = (params.folder ?? '').trim();
+    if (!raw) throw new Error('"folder" is required');
+
+    const target = raw.replace(/^\/+/, '').replace(/\/+$/, '');
+    const targetLower = target.toLowerCase();
+
+    // Match on full path first so "Homebrew/Classes" and "Archive/Classes" stay
+    // distinct; fall back to a bare-name or id match for convenience.
+    let folderDoc: any = null;
+    for (const f of ((game as any).folders ?? []) as Iterable<any>) {
+      if (f.id === target) {
+        folderDoc = f;
+        break;
+      }
+      if (this.folderPathOf(f).toLowerCase() === targetLower) {
+        folderDoc = f;
+        break;
+      }
+    }
+    if (!folderDoc) {
+      for (const f of ((game as any).folders ?? []) as Iterable<any>) {
+        if ((f.name ?? '').toLowerCase() === targetLower) {
+          folderDoc = f;
+          break;
+        }
+      }
+    }
+    if (!folderDoc) {
+      throw new Error(`Folder not found: "${params.folder}" (matched by path, id, then name).`);
+    }
+
+    const documentName = folderDoc.type;
+    const label = params.packLabel?.trim() || `${folderDoc.name} Export`;
+    const packName =
+      params.packName?.trim() ||
+      `mcp-export-${
+        (folderDoc.name ?? 'folder')
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-+/, '')
+          .replace(/-+$/, '')
+          .slice(0, 40) || 'folder'
+      }`;
+
+    const collectionId = `world.${packName}`;
+    let pack = (game as any).packs?.get?.(collectionId) ?? null;
+
+    if (pack && pack.documentName !== documentName) {
+      throw new Error(
+        `Compendium "${collectionId}" already exists but holds ${pack.documentName} documents, ` +
+          `not ${documentName}. Pass a different "packName".`
+      );
+    }
+
+    let created = false;
+    if (!pack) {
+      const CompendiumCls = (globalThis as any).CompendiumCollection;
+      if (!CompendiumCls?.createCompendium) {
+        throw new Error(
+          'CompendiumCollection.createCompendium is unavailable in this Foundry build.'
+        );
+      }
+      pack = await CompendiumCls.createCompendium({
+        label,
+        name: packName,
+        type: documentName,
+        package: 'world',
+      });
+      created = true;
+    }
+
+    if (pack.locked) {
+      await pack.configure({ locked: false });
+    }
+
+    const before = pack.index?.size ?? 0;
+    await folderDoc.exportToCompendium(pack, { updateByName: params.updateByName === true });
+    // The index is what everything downstream reads; refresh before counting.
+    await pack.getIndex();
+    const after = pack.index?.size ?? 0;
+
+    this.auditLog(
+      'exportFolderToCompendium',
+      { folder: this.folderPathOf(folderDoc), pack: collectionId, documentName },
+      'success'
+    );
+
+    return {
+      success: true,
+      pack: collectionId,
+      packLabel: pack.metadata?.label ?? label,
+      documentName,
+      createdPack: created,
+      folder: { id: folderDoc.id, name: folderDoc.name, path: this.folderPathOf(folderDoc) },
+      entriesBefore: before,
+      entriesAfter: after,
+      note: created
+        ? 'New world compendium created. It appears in the Compendium sidebar tab.'
+        : 'Existing world compendium reused.',
+    };
+  }
+
+  /**
+   * Full stat-block read for standalone world Items — the whole stored document via
+   * `toObject()`, `system` block included.
+   *
+   * This is the gap `listWorldItems` leaves: that method is deliberately an index
+   * (id/name/type/folder) so listing a large world stays cheap, which means every
+   * scrape of world Items was name-and-folder only. `manage-world-items describe`
+   * looks like it should fill the gap but does not — it is a per-system enum
+   * reference, and it is empty for pf2e.
+   *
+   * Verbatim `toObject()` rather than a curated view on purpose: a curated shape goes
+   * stale every time the game system moves a field, and silently drops whatever it
+   * does not know about. The caller can narrow; it cannot recover what was never sent.
+   *
+   * Bounded by `maxDocuments` because the MCP query transport has a hard 10s timeout
+   * (foundry-connector.ts) and these documents are large. A filter matching more than
+   * the cap fails loudly with the count rather than timing out or truncating — for a
+   * bulk dump the caller wants exportWorldData, which batches and writes to disk.
+   */
+  async getWorldItems(params: {
+    ids?: string[];
+    type?: string;
+    folder?: string;
+    nameFilter?: string;
+    maxDocuments?: number;
+  }): Promise<{ items: any[]; total: number }> {
+    this.validateFoundryState();
+
+    const cap = Math.max(1, Math.min(params.maxDocuments ?? 25, 200));
+    let matched: any[] = [];
+
+    if (params.ids && params.ids.length > 0) {
+      // Validate every id before returning anything, so a typo is an error rather
+      // than a silently short list the caller reads as "that item does not exist".
+      const missing: string[] = [];
+      for (const id of params.ids) {
+        const doc = (game as any).items?.get?.(id) ?? null;
+        if (doc) matched.push(doc);
+        else missing.push(id);
+      }
+      if (missing.length > 0) {
+        throw new Error(
+          `Unknown world Item id(s): ${missing.join(', ')}. ` +
+            `Get ids from manage-world-items action:"list".`
+        );
+      }
+    } else {
+      const index = await this.listWorldItems({
+        ...(params.type !== undefined ? { type: params.type } : {}),
+        ...(params.folder !== undefined ? { folder: params.folder } : {}),
+        ...(params.nameFilter !== undefined ? { nameFilter: params.nameFilter } : {}),
+      });
+      matched = index
+        .map((entry: any) => (game as any).items?.get?.(entry.id))
+        .filter((doc: any) => !!doc);
+    }
+
+    if (matched.length > cap) {
+      throw new Error(
+        `action:"get" matched ${matched.length} world Items, over the ${cap}-document cap. ` +
+          `Narrow the filter, pass a larger "maxDocuments" (max 200), or use ` +
+          `export-world-data to write them all to disk instead.`
+      );
+    }
+
+    const items = matched.map((doc: any) => ({
+      id: doc.id,
+      name: doc.name,
+      type: doc.type,
+      img: doc.img ?? null,
+      folderId: doc.folder?.id ?? null,
+      folderPath: this.folderPathOf(doc.folder),
+      document: doc.toObject(),
+    }));
+
+    return { items, total: items.length };
   }
 
   /**
@@ -7458,6 +7878,35 @@ export class FoundryDataAccess {
    * "Villains/Bosses" produce two distinct "Bosses" folders under different parents.
    * Returns null on failure so callers can fall back to creating content unfiled.
    */
+  /**
+   * The inverse of resolveFolderPath: given a Folder document (or null), walk up
+   * `.folder` to the root and return a "/"-separated path, e.g. "Homebrew/Classes".
+   * Returns '' for a document sitting at the root.
+   *
+   * Foundry caps folder nesting, so the walk is bounded anyway, but the depth guard
+   * is there so a cyclic or corrupt folder graph can never hang the client — this
+   * runs inside the GM's browser, and an infinite loop here freezes their Foundry.
+   *
+   * Segments are returned raw (a Foundry folder name may contain "/" or characters
+   * illegal in a filename); sanitising for disk is the MCP server's job, not this one.
+   */
+  private folderPathOf(folder: any): string {
+    const segments: string[] = [];
+    let current = folder;
+    let depth = 0;
+    const seen = new Set<string>();
+    while (current && depth < 32) {
+      if (current.id) {
+        if (seen.has(current.id)) break; // cycle guard
+        seen.add(current.id);
+      }
+      segments.unshift(current.name ?? '');
+      current = current.folder ?? null;
+      depth += 1;
+    }
+    return segments.join('/');
+  }
+
   private async resolveFolderPath(
     pathOrName: string,
     // Folder document type: 'Actor' | 'JournalEntry' | 'Item' | 'Scene' | 'RollTable' | ...
@@ -11544,6 +11993,7 @@ export class FoundryDataAccess {
     command?: string;
     img?: string;
     folder?: string;
+    full?: boolean;
   }): Promise<any> {
     this.validateFoundryState();
 
@@ -11585,16 +12035,29 @@ export class FoundryDataAccess {
 
       case 'list': {
         const macros = Array.from(((game as any).macros ?? []) as Iterable<any>);
+        // `full` returns the whole command for every macro in one call. Without it a
+        // whole-world macro export is one `get` per macro — 118 round trips on a
+        // world we tested against. Folder is reported as a "/"-separated path as well
+        // as a bare name, so colliding macro names stay tellable apart: Foundry allows
+        // duplicates freely, and that test world had two distinct pairs sharing a name.
         return {
           macros: macros.map((m: any) => ({
             id: m.id,
             name: m.name,
             type: m.type,
             folder: m.folder?.name ?? null,
-            commandPreview:
-              (m.command ?? '').length > 120 ? `${m.command.slice(0, 120)}…` : (m.command ?? ''),
+            folderPath: this.folderPathOf(m.folder),
+            ...(params.full
+              ? { command: m.command ?? '', img: m.img ?? null }
+              : {
+                  commandPreview:
+                    (m.command ?? '').length > 120
+                      ? `${m.command.slice(0, 120)}…`
+                      : (m.command ?? ''),
+                }),
           })),
           total: macros.length,
+          full: params.full === true,
         };
       }
 

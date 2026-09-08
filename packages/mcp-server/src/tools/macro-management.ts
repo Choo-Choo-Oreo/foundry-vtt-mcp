@@ -39,7 +39,10 @@ export class MacroManagementTools {
           'Create, list, inspect, edit, move, delete, and execute Foundry macros. GM-only.\n' +
           '- "create": new macro from `name`, `type` ("script" = JavaScript, "chat" = chat text), ' +
           'and `command` (the JS source or chat message).\n' +
-          '- "list": all world macros with id, type, folder, and a command preview.\n' +
+          '- "list": all world macros with id, type, folder path, and a command preview. ' +
+          'Pass `full`:true to get the complete command for every macro in this one call, ' +
+          'instead of one "get" per macro — that is how to export a whole world of macros. ' +
+          'The response can be large; to dump to disk instead, use export-world-data.\n' +
           '- "get": one macro (by `id` or exact name) including its full command.\n' +
           '- "update": change name/type/command/img by `id`.\n' +
           '- "move": refile a macro into `folder` (name, id, or "/"-separated path; created if missing).\n' +
@@ -73,6 +76,12 @@ export class MacroManagementTools {
                 'The macro body: JavaScript source for "script", message text for "chat".',
             },
             img: { type: 'string', description: 'Macro icon image path.' },
+            full: {
+              type: 'boolean',
+              description:
+                'For "list" only: return the full `command` and img for each macro rather ' +
+                'than a 120-character preview. Use when exporting; omit when browsing.',
+            },
             folder: {
               type: 'string',
               description:
@@ -96,6 +105,7 @@ export class MacroManagementTools {
         command: z.string().min(1).optional(),
         img: z.string().min(1).optional(),
         folder: z.string().min(1).optional(),
+        full: z.boolean().optional(),
       })
       .refine(v => v.action !== 'create' || (!!v.name && !!v.command), {
         message: 'action "create" requires "name" and "command"',
@@ -112,7 +122,11 @@ export class MacroManagementTools {
 
     const params = schema.parse(args);
 
-    this.logger.info('manage-macros', { action: params.action, id: params.id ?? null });
+    this.logger.info('manage-macros', {
+      action: params.action,
+      id: params.id ?? null,
+      full: params.full ?? false,
+    });
 
     try {
       return await this.foundryClient.query('foundry-mcp-bridge.manageMacros', params);
