@@ -30,6 +30,7 @@ import { ChatTools } from './tools/chat.js';
 import { RollTableManagementTools } from './tools/rolltable-management.js';
 import { MacroManagementTools } from './tools/macro-management.js';
 import { WorldExportTools } from './tools/world-export.js';
+import { DocumentationTools } from './tools/documentation.js';
 import { ImageManagementTools } from './tools/image-management.js';
 
 import { QuestCreationTools } from './tools/quest-creation.js';
@@ -1209,6 +1210,7 @@ async function startBackend(): Promise<void> {
   const rollTableManagementTools = new RollTableManagementTools({ foundryClient, logger });
   const macroManagementTools = new MacroManagementTools({ foundryClient, logger });
   const worldExportTools = new WorldExportTools({ foundryClient, logger });
+  const documentationTools = new DocumentationTools({ foundryClient, logger });
   const imageManagementTools = new ImageManagementTools({ foundryClient, logger });
 
   const dsa5CharacterCreator = new DSA5CharacterCreator({ foundryClient, logger });
@@ -1446,6 +1448,7 @@ async function startBackend(): Promise<void> {
     ...rollTableManagementTools.getToolDefinitions(),
     ...macroManagementTools.getToolDefinitions(),
     ...worldExportTools.getToolDefinitions(),
+    ...documentationTools.getToolDefinitions(),
     ...imageManagementTools.getToolDefinitions(),
 
     ...dsa5CharacterCreator.getToolDefinitions(),
@@ -1474,6 +1477,10 @@ async function startBackend(): Promise<void> {
 
     ...mapGenerationTools.getToolDefinitions(),
   ];
+
+  // Generated, never hand-listed: a hand-written tool list is wrong the moment
+  // somebody adds a tool. Wired after assembly because foundry-docs is itself in it.
+  documentationTools.setToolCatalog(() => allTools);
 
   // Start Foundry connector (owns app port 31415)
 
@@ -1679,6 +1686,11 @@ async function startBackend(): Promise<void> {
 
                 case 'export-to-compendium':
                   result = await worldExportTools.handleExportToCompendium(args);
+
+                  break;
+
+                case 'foundry-docs':
+                  result = await documentationTools.handleFoundryDocs(args);
 
                   break;
 
