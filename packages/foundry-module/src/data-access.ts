@@ -11914,12 +11914,16 @@ export class FoundryDataAccess {
         total: typeof r.total === 'number' ? r.total : 0,
       }));
       const speakerActorId = m.speaker?.actor;
+      const authorName = m.author?.name ?? m.user?.name ?? null;
+      // ChatMessage#alias (chat-message.mjs) always shows the posting user's name for an
+      // OOC-styled message (style 1) even when speaker.alias/speakerActor is populated -
+      // Foundry deliberately ignores the impersonated-token alias there.
       const speakerName =
-        m.speaker?.alias ??
-        (speakerActorId ? (game as any).actors?.get(speakerActorId)?.name : null) ??
-        m.author?.name ??
-        m.user?.name ??
-        null;
+        m.style === 1
+          ? authorName
+          : (m.speaker?.alias ??
+            (speakerActorId ? (game as any).actors?.get(speakerActorId)?.name : null) ??
+            authorName);
 
       return {
         id: m.id,

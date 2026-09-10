@@ -89,6 +89,49 @@ describe('FoundryDataAccess.listChatLog', () => {
   });
 });
 
+describe('FoundryDataAccess.listChatLog speaker resolution', () => {
+  let dataAccess: FoundryDataAccess;
+
+  it('an OOC-styled message reports the posting user, not an impersonated token alias', async () => {
+    // Foundry's real ChatMessage#alias getter always returns the author's name for an
+    // OOC-styled message (style 1) even when speaker.alias is populated - audit round 8
+    // found the bridge ignored `style` entirely and would report the token/actor name.
+    const oocMessage = {
+      id: 'm1',
+      timestamp: 1000,
+      content: 'hello out of character',
+      rolls: [],
+      whisper: [],
+      style: 1,
+      author: { name: 'Real Player' },
+      speaker: { alias: 'Some Impersonated Token' },
+    };
+    stubGame({ messages: { contents: [oocMessage] }, users: { get: () => undefined } });
+    dataAccess = new FoundryDataAccess();
+
+    const result = await dataAccess.listChatLog({ limit: 5 });
+    expect(result.entries[0]!.speaker).toBe('Real Player');
+  });
+
+  it('a normal (non-OOC) message still prefers the speaker alias over the author name', async () => {
+    const inCharacterMessage = {
+      id: 'm1',
+      timestamp: 1000,
+      content: 'hello in character',
+      rolls: [],
+      whisper: [],
+      style: 0,
+      author: { name: 'Real Player' },
+      speaker: { alias: 'Some Impersonated Token' },
+    };
+    stubGame({ messages: { contents: [inCharacterMessage] }, users: { get: () => undefined } });
+    dataAccess = new FoundryDataAccess();
+
+    const result = await dataAccess.listChatLog({ limit: 5 });
+    expect(result.entries[0]!.speaker).toBe('Some Impersonated Token');
+  });
+});
+
 describe('FoundryDataAccess.manageCombat', () => {
   let dataAccess: FoundryDataAccess;
 
