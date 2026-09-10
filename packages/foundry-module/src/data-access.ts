@@ -8341,6 +8341,23 @@ export class FoundryDataAccess {
     }
 
     if (params.action === 'delete') {
+      // Audit round 19 (2026-09-10): same gap round 15 found and fixed in
+      // deleteWorldItems/deleteCompendiumPack/deleteActorItems/deleteActors —
+      // this permanent delete (which, with deleteContents:true, also
+      // permanently deletes every document inside the folder) never
+      // consulted `permissionManager`. queries.ts's `handleManageFolders`
+      // only calls `validateGMAccess()` (queries.ts:17-23), which checks
+      // `game.user?.isGM` — a different axis than the "Allow Write
+      // Operations" setting a GM would flip to stop AI-driven writes/deletes
+      // (settings.ts ~243-250, ~552-557). A GM with that setting off could
+      // still have folders and their contents permanently deleted here.
+      const permissionCheck = permissionManager.checkWritePermission('deleteData', {
+        targetIds: targets.map((f: any) => f.id),
+      });
+      if (!permissionCheck.allowed) {
+        throw new Error(`${ERROR_MESSAGES.ACCESS_DENIED}: ${permissionCheck.reason}`);
+      }
+
       const deleteContents = params.deleteContents === true;
       const deleteSubfolders = params.deleteSubfolders !== false; // default true
       const deleted: Array<{ id: string; name: string; path: string }> = [];
@@ -12833,6 +12850,22 @@ export class FoundryDataAccess {
       }
 
       case 'delete': {
+        // Audit round 19 (2026-09-10): same gap round 15 found and fixed in
+        // deleteWorldItems/deleteCompendiumPack/deleteActorItems/deleteActors
+        // — this permanent delete never consulted `permissionManager`.
+        // queries.ts's `handleManageRollTables` only calls
+        // `validateGMAccess()` (queries.ts:17-23, checks `game.user?.isGM`),
+        // a different axis than the "Allow Write Operations" setting a GM
+        // would flip to stop AI-driven writes/deletes (settings.ts
+        // ~243-250, ~552-557). A GM with that setting off could still have
+        // roll tables permanently deleted here.
+        const permissionCheck = permissionManager.checkWritePermission('deleteData', {
+          targetIds: params.ids ?? [],
+        });
+        if (!permissionCheck.allowed) {
+          throw new Error(`${ERROR_MESSAGES.ACCESS_DENIED}: ${permissionCheck.reason}`);
+        }
+
         const resolved: Array<{ id: string; name: string }> = [];
         const missing: string[] = [];
         for (const id of params.ids ?? []) {
@@ -13032,6 +13065,22 @@ export class FoundryDataAccess {
       }
 
       case 'delete': {
+        // Audit round 19 (2026-09-10): same gap round 15 found and fixed in
+        // deleteWorldItems/deleteCompendiumPack/deleteActorItems/deleteActors
+        // — this permanent delete never consulted `permissionManager`.
+        // queries.ts's `handleManageMacros` only calls `validateGMAccess()`
+        // (queries.ts:17-23, checks `game.user?.isGM`), a different axis
+        // than the "Allow Write Operations" setting a GM would flip to stop
+        // AI-driven writes/deletes (settings.ts ~243-250, ~552-557). A GM
+        // with that setting off could still have macros permanently deleted
+        // here.
+        const permissionCheck = permissionManager.checkWritePermission('deleteData', {
+          targetIds: params.ids ?? [],
+        });
+        if (!permissionCheck.allowed) {
+          throw new Error(`${ERROR_MESSAGES.ACCESS_DENIED}: ${permissionCheck.reason}`);
+        }
+
         const resolved: Array<{ id: string; name: string }> = [];
         const missing: string[] = [];
         for (const id of params.ids ?? []) {
