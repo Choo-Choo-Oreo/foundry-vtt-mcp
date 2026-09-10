@@ -8886,55 +8886,78 @@ export class FoundryDataAccess {
         throw new Error(`Condition not found: ${data.conditionId}`);
       }
 
+      // PF2e conditions are Item documents (type "condition"), applied and removed
+      // through game.pf2e.ConditionManager and Actor#toggleCondition/increaseCondition/
+      // decreaseCondition (installed pf2e system, pf2e.mjs ~32100-32168:
+      // `increaseCondition` does `createEmbeddedDocuments("Item", ...)`,
+      // `decreaseCondition` does `deleteEmbeddedDocuments("Item", ...)`) - never
+      // ActiveEffects. The generic ActiveEffect branch below is correct for D&D5e
+      // and DSA5 (both apply conditions as ActiveEffects), but for pf2e it creates
+      // a floating ActiveEffect that pf2e's own condition system - conditions.bySlug,
+      // hasCondition, the token HUD condition icons, and any rule element keyed off
+      // the condition - never recognizes. The call reports success but the
+      // condition is functionally absent: this is the pf2e half of the
+      // long-suspected token-condition-noops gap. Route pf2e through the real API.
+      const isPf2e =
+        (game.system as any)?.id === 'pf2e' && typeof actor.toggleCondition === 'function';
+
       if (data.active) {
-        // Add the condition - handle DSA5 and other systems
-        const effectData: any = {
-          name: condition.name || condition.label || condition.id,
-          icon: condition.icon || condition.img,
-        };
+        if (isPf2e) {
+          await actor.toggleCondition(condition.id, { active: true });
+        } else {
+          // Add the condition - handle DSA5 and other systems
+          const effectData: any = {
+            name: condition.name || condition.label || condition.id,
+            icon: condition.icon || condition.img,
+          };
 
-        // Add statuses for systems that support it (D&D5e, PF2e)
-        if (condition.id) {
-          effectData.statuses = [condition.id];
+          // Add statuses for systems that support it (D&D5e, PF2e)
+          if (condition.id) {
+            effectData.statuses = [condition.id];
+          }
+
+          // DSA5-specific: Copy all properties from the condition
+          // DSA5 conditions have different structure than D&D5e/PF2e
+          if ((game.system as any)?.id === 'dsa5') {
+            // For DSA5, use the condition's full data structure
+            Object.assign(effectData, {
+              flags: condition.flags || {},
+              changes: condition.changes || [],
+              duration: condition.duration || {},
+              origin: condition.origin,
+            });
+          }
+
+          await actor.createEmbeddedDocuments('ActiveEffect', [effectData]);
         }
-
-        // DSA5-specific: Copy all properties from the condition
-        // DSA5 conditions have different structure than D&D5e/PF2e
-        if ((game.system as any)?.id === 'dsa5') {
-          // For DSA5, use the condition's full data structure
-          Object.assign(effectData, {
-            flags: condition.flags || {},
-            changes: condition.changes || [],
-            duration: condition.duration || {},
-            origin: condition.origin,
-          });
-        }
-
-        await actor.createEmbeddedDocuments('ActiveEffect', [effectData]);
       } else {
-        // Remove the condition
-        const effects = actor.effects?.contents || [];
-        const effectsToRemove = effects.filter((effect: any) => {
-          // Check by status (D&D5e, PF2e)
-          if (effect.statuses?.has(data.conditionId)) {
-            return true;
-          }
-          // Check by name (fallback for all systems including DSA5)
-          if (effect.name?.toLowerCase() === data.conditionId.toLowerCase()) {
-            return true;
-          }
-          // Check by label (some systems use label instead of name)
-          if (effect.label?.toLowerCase() === data.conditionId.toLowerCase()) {
-            return true;
-          }
-          return false;
-        });
+        if (isPf2e) {
+          await actor.toggleCondition(condition.id, { active: false });
+        } else {
+          // Remove the condition
+          const effects = actor.effects?.contents || [];
+          const effectsToRemove = effects.filter((effect: any) => {
+            // Check by status (D&D5e, PF2e)
+            if (effect.statuses?.has(data.conditionId)) {
+              return true;
+            }
+            // Check by name (fallback for all systems including DSA5)
+            if (effect.name?.toLowerCase() === data.conditionId.toLowerCase()) {
+              return true;
+            }
+            // Check by label (some systems use label instead of name)
+            if (effect.label?.toLowerCase() === data.conditionId.toLowerCase()) {
+              return true;
+            }
+            return false;
+          });
 
-        if (effectsToRemove.length > 0) {
-          await actor.deleteEmbeddedDocuments(
-            'ActiveEffect',
-            effectsToRemove.map((e: any) => e.id)
-          );
+          if (effectsToRemove.length > 0) {
+            await actor.deleteEmbeddedDocuments(
+              'ActiveEffect',
+              effectsToRemove.map((e: any) => e.id)
+            );
+          }
         }
       }
 
