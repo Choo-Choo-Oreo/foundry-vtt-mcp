@@ -9442,8 +9442,41 @@ export class FoundryDataAccess {
           console.error(`[foundry-mcp-bridge] Error using item ${item.name}:`, err);
         });
       } else if (typeof itemAny.toChat === 'function') {
-        // PF2e and some other systems use toChat
-        if (typeof itemAny.toMessage === 'function') {
+        // PF2e and some other systems use toChat.
+        //
+        // Live-verified bug (2026-09-10, post-round-20 stress test): PF2e's own
+        // `MeleePF2e#toMessage` - the "melee"-type NPC attack item class, installed
+        // pf2e.mjs ~52386-52393 - does NOT post a chat card the way the base
+        // `ItemPF2e#toMessage` (~45006, used by weapons/armor/equipment/etc.) does.
+        // Instead, whenever the item has a matching entry in the actor's derived
+        // `system.actions` (i.e. it backs a strike), it silently delegates to
+        // `game.pf2e.rollActionMacro({ itemId, slug })` with NO `actorUUID`.
+        // `rollActionMacro`'s `resolveMacroActor(undefined)` (~25435-25441) then
+        // falls back to `ChatMessage.getSpeaker()`, which resolves the acting actor
+        // from the *currently controlled/selected token on canvas* - something
+        // use-item never sets (it only targets tokens via `canvas.tokens.setTargets`,
+        // a separate concept from selection). With no token selected, this returns
+        // no actor at all, and pf2e shows "This actor no longer exists!" (from a
+        // silent no-op) instead of ever using the item.
+        const strikeAction =
+          systemId === 'pf2e'
+            ? (actor as any).system?.actions?.find((a: any) => a.item === itemAny)
+            : undefined;
+        if (strikeAction) {
+          // Call the same public API `toMessage()` delegates to, but with an
+          // explicit `actorUUID` so `resolveMacroActor` can resolve it via
+          // `fromUuidSync` instead of falling back to canvas token selection.
+          (game as any).pf2e
+            .rollActionMacro({
+              actorUUID: actor.uuid,
+              itemId: item.id,
+              slug: strikeAction.slug,
+              type: strikeAction.type,
+            })
+            .catch((err: Error) => {
+              console.error(`[foundry-mcp-bridge] Error using item ${item.name}:`, err);
+            });
+        } else if (typeof itemAny.toMessage === 'function') {
           itemAny.toMessage(undefined, { create: true }).catch((err: Error) => {
             console.error(`[foundry-mcp-bridge] Error using item ${item.name}:`, err);
           });
