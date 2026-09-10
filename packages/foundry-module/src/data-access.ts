@@ -1527,17 +1527,21 @@ class PersistentCreatureIndex {
 
   /**
    * Resolve a Cosmere DerivedValueField (`{value, derived, override?, useOverride, bonus?}`).
-   * Honours `useOverride: true` so manually-typed values (like Investiture max
-   * on a sheet the system can't auto-derive) come through correctly.
+   * On a live, prepared actor `value` is already the fully-resolved number - Cosmere's own
+   * getter computes it as `(useOverride ? override : derived) + bonus` (cosmere-rpg
+   * src/system/data/fields/derived-value-field.ts) - so `value` is checked first. The
+   * useOverride/override/derived fallback only matters for a hand-built/legacy shape that
+   * has no `value` at all (audit round 6 found the old override-before-value order silently
+   * dropped `bonus` whenever useOverride was true).
    */
   private readDerived(field: any): number | undefined {
     if (field == null) return undefined;
     if (typeof field === 'number') return field;
     if (typeof field === 'object') {
+      if (typeof field.value === 'number') return field.value;
       if (field.useOverride === true && typeof field.override === 'number') {
         return field.override;
       }
-      if (typeof field.value === 'number') return field.value;
       if (typeof field.derived === 'number') return field.derived;
     }
     return undefined;
@@ -11990,17 +11994,17 @@ export class FoundryDataAccess {
       return (game as any).combat ?? null;
     };
 
-    // pf2e/dnd5e keep HP at system.attributes.hp; WFRP4e at system.status.wounds
-    // (data-access.ts wfrp4e actor-write path, ~line 7409); Cosmere RPG at
+    // pf2e/dnd5e keep HP at system.attributes.hp; WFRP4e AND DSA5 both at
+    // system.status.wounds (DSA5's own actor-dsa5.js applyDamage/applyRegeneration
+    // read/write system.status.wounds.value/.max the same way WFRP4e does - audit
+    // round 6 confirmed via DSA5's upstream source and template.json after round 5
+    // wrongly logged DSA5 as an unhandled gap; the two systems just happen to share
+    // this shape, so DSA5 was already covered by this branch); Cosmere RPG at
     // system.resources.hea as DerivedValueField(s) (see readDerived's own doc
     // comment); MGT2e (Traveller) at system.hits, either {value, max} or (rarely,
     // pre-normalization) a bare number treated as max - same shape already read
     // at ~line 1455 and written at ~line 11368. Checked in that order so a
     // system matching an earlier shape never falls through to a later one.
-    // DSA5 is also a fully-supported system but no HP/wounds field for it has
-    // been identified anywhere in this codebase - it silently falls through to
-    // null below rather than being guessed at (see manage-combat-hp-system-
-    // coverage in the notes file).
     const readCombatantHp = (actor: any): { value: number | null; max: number | null } | null => {
       const system = actor?.system;
       if (!system) return null;
@@ -12015,17 +12019,21 @@ export class FoundryDataAccess {
         return { value: wounds.value ?? null, max: wounds.max ?? null };
       }
 
-      // Cosmere DerivedValueField ({value, derived, override?, useOverride}) -
-      // duplicated from PersistentCreatureIndex.readDerived rather than shared
-      // across classes for a two-line resolver.
+      // Cosmere DerivedValueField ({value, derived, override?, useOverride, bonus?}) -
+      // duplicated from PersistentCreatureIndex.readDerived rather than shared across
+      // classes for a two-line resolver. `value` is checked first because on a live,
+      // prepared actor it's already the fully-resolved (useOverride ? override :
+      // derived) + bonus number (cosmere-rpg's own DerivedValueField getter) - audit
+      // round 6 found the previous override-before-value order silently dropped
+      // `bonus` whenever useOverride was true.
       const resolveDerived = (field: any): number | undefined => {
         if (field == null) return undefined;
         if (typeof field === 'number') return field;
         if (typeof field === 'object') {
+          if (typeof field.value === 'number') return field.value;
           if (field.useOverride === true && typeof field.override === 'number') {
             return field.override;
           }
-          if (typeof field.value === 'number') return field.value;
           if (typeof field.derived === 'number') return field.derived;
         }
         return undefined;
@@ -12055,6 +12063,13 @@ export class FoundryDataAccess {
 
     const combatantSnapshot = (c: any) => {
       const actor = c.actor ?? null;
+      // Prefer Foundry's own Combatant#isNPC getter, which is documented as
+      // treating an actor-less combatant (deleted actor, orphaned token) as NPC
+      // (true) rather than unknown - audit round 6 found the prior
+      // actor-only fallback returned null for that case instead. Only fall back
+      // to reimplementing it via hasPlayerOwner when c.isNPC isn't present at
+      // all (e.g. a stubbed combatant in tests).
+      const isNPC = typeof c.isNPC === 'boolean' ? c.isNPC : actor ? !actor.hasPlayerOwner : true;
       return {
         id: c.id,
         name: c.name ?? actor?.name ?? 'Unknown',
@@ -12063,7 +12078,7 @@ export class FoundryDataAccess {
         initiative: c.initiative ?? null,
         hidden: !!c.hidden,
         defeated: !!(c.isDefeated ?? c.defeated),
-        isNPC: actor ? !actor.hasPlayerOwner : null,
+        isNPC,
         hp: readCombatantHp(actor),
       };
     };
@@ -12175,7 +12190,12 @@ export class FoundryDataAccess {
 
       case 'add-combatants': {
         if (!params.tokenIds?.length) throw new Error('add-combatants requires tokenIds');
-        const scene = (game.scenes as any).current;
+        // Prefer the target combat's OWN scene (combat.scene, a real Combat field/getter)
+        // over the currently-viewed scene - audit round 6 found the prior code always used
+        // the viewed scene even when combatId targets a different, non-viewed combat (this
+        // tool's own combatId param exists specifically to let a caller do that). Falls back
+        // to the viewed scene for a scene-less combat, which Foundry does allow.
+        const scene = combat.scene ?? (game.scenes as any).current;
         if (!scene) throw new Error('No active scene found');
         const notFound: string[] = [];
         const creates: any[] = [];
