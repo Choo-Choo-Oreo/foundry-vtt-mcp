@@ -13,10 +13,15 @@ import { ChatTools } from './chat.js';
 function makeTools(queryImpl?: (method: string, data: any) => unknown) {
   const query = vi.fn(
     queryImpl ??
-      (async (method: string) =>
-        method === 'foundry-mcp-bridge.rollDice'
-          ? { formula: '2d6+3', total: 11, result: '5 + 3 + 3', dice: [] }
-          : { id: 'm1', content: 'hi', speaker: null, whisperedTo: [] })
+      (async (method: string) => {
+        if (method === 'foundry-mcp-bridge.rollDice') {
+          return { formula: '2d6+3', total: 11, result: '5 + 3 + 3', dice: [] };
+        }
+        if (method === 'foundry-mcp-bridge.listChatLog') {
+          return { entries: [], total: 0 };
+        }
+        return { id: 'm1', content: 'hi', speaker: null, whisperedTo: [] };
+      })
   );
   const logger: any = { info: vi.fn(), error: vi.fn(), warn: vi.fn(), child: () => logger };
   const foundryClient: any = { query };
@@ -24,13 +29,18 @@ function makeTools(queryImpl?: (method: string, data: any) => unknown) {
 }
 
 describe('ChatTools.getToolDefinitions', () => {
-  it('advertises send-chat-message and roll-dice', () => {
-    const names = makeTools().tools.getToolDefinitions().map((d: any) => d.name);
-    expect(names).toEqual(['send-chat-message', 'roll-dice']);
+  it('advertises send-chat-message, roll-dice and list-chat-log', () => {
+    const names = makeTools()
+      .tools.getToolDefinitions()
+      .map((d: any) => d.name);
+    expect(names).toEqual(['send-chat-message', 'roll-dice', 'list-chat-log']);
   });
 
-  it('constrains rollMode to Foundry\'s four modes on both tools', () => {
-    const defs = makeTools().tools.getToolDefinitions();
+  it("constrains rollMode to Foundry's four modes on the tools that roll", () => {
+    const defs = makeTools()
+      .tools.getToolDefinitions()
+      .filter((d: any) => d.inputSchema.properties.rollMode);
+    expect(defs).toHaveLength(2);
     for (const def of defs) {
       expect((def as any).inputSchema.properties.rollMode.enum).toEqual([
         'publicroll',
@@ -105,5 +115,36 @@ describe('roll-dice', () => {
       throw new Error('Could not evaluate dice formula "2dd6"');
     });
     await expect(tools.handleRollDice({ formula: '2dd6' })).rejects.toThrow(/2dd6/);
+  });
+});
+
+describe('list-chat-log', () => {
+  it('forwards limit/sinceId/rollsOnly to the bridge', async () => {
+    const { tools, query } = makeTools();
+    await tools.handleListChatLog({ limit: 5, sinceId: 'm42', rollsOnly: true });
+    expect(query).toHaveBeenCalledWith('foundry-mcp-bridge.listChatLog', {
+      limit: 5,
+      sinceId: 'm42',
+      rollsOnly: true,
+    });
+  });
+
+  it('defaults to an empty args object', async () => {
+    const { tools, query } = makeTools();
+    await tools.handleListChatLog({});
+    expect(query).toHaveBeenCalledWith('foundry-mcp-bridge.listChatLog', {});
+  });
+
+  it('rejects a limit over 200 without calling the bridge', async () => {
+    const { tools, query } = makeTools();
+    await expect(tools.handleListChatLog({ limit: 500 })).rejects.toThrow();
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a bridge failure', async () => {
+    const { tools } = makeTools(async () => {
+      throw new Error('boom');
+    });
+    await expect(tools.handleListChatLog({})).rejects.toThrow(/Failed to list chat log/);
   });
 });

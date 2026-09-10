@@ -27,6 +27,8 @@ import { ActorManagementTools } from './tools/actor-management.js';
 import { FolderManagementTools } from './tools/folder-management.js';
 import { JournalManagementTools } from './tools/journal-management.js';
 import { ChatTools } from './tools/chat.js';
+import { CombatTools } from './tools/combat.js';
+import { DiagnosticsTools } from './tools/diagnostics.js';
 import { RollTableManagementTools } from './tools/rolltable-management.js';
 import { MacroManagementTools } from './tools/macro-management.js';
 import { WorldExportTools } from './tools/world-export.js';
@@ -1208,6 +1210,8 @@ async function startBackend(): Promise<void> {
   const folderManagementTools = new FolderManagementTools({ foundryClient, logger });
   const journalManagementTools = new JournalManagementTools({ foundryClient, logger });
   const chatTools = new ChatTools({ foundryClient, logger });
+  const combatTools = new CombatTools({ foundryClient, logger });
+  const diagnosticsTools = new DiagnosticsTools({ foundryClient, logger });
   const rollTableManagementTools = new RollTableManagementTools({ foundryClient, logger });
   const macroManagementTools = new MacroManagementTools({ foundryClient, logger });
   const worldExportTools = new WorldExportTools({ foundryClient, logger });
@@ -1447,6 +1451,8 @@ async function startBackend(): Promise<void> {
     ...folderManagementTools.getToolDefinitions(),
     ...journalManagementTools.getToolDefinitions(),
     ...chatTools.getToolDefinitions(),
+    ...combatTools.getToolDefinitions(),
+    ...diagnosticsTools.getToolDefinitions(),
     ...rollTableManagementTools.getToolDefinitions(),
     ...macroManagementTools.getToolDefinitions(),
     ...worldExportTools.getToolDefinitions(),
@@ -1666,6 +1672,25 @@ async function startBackend(): Promise<void> {
 
                 case 'roll-dice':
                   result = await chatTools.handleRollDice(args);
+
+                  break;
+
+                case 'list-chat-log':
+                  result = await chatTools.handleListChatLog(args);
+
+                  break;
+
+                // Combat tracker
+
+                case 'manage-combat':
+                  result = await combatTools.handleManageCombat(args);
+
+                  break;
+
+                // Dev/debug diagnostics
+
+                case 'get-module-diagnostics':
+                  result = await diagnosticsTools.handleGetModuleDiagnostics(args);
 
                   break;
 

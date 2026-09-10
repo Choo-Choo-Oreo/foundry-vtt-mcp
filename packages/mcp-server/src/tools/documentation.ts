@@ -166,6 +166,16 @@ const BUILTIN_CONSTRAINTS: Array<{ title: string; body: string }> = [
       'the bridge is logged in as a GM — not that the tool is broken.',
   },
   {
+    title: 'Every tool is a pull — nothing from Foundry is ever pushed to you',
+    body:
+      'MCP tools here only run when called; there is no channel by which Foundry notifies a ' +
+      'client that something happened. This matters most for `manage-combat` and ' +
+      '`list-chat-log`: "whose turn is it now" and "what did the player just roll" are only ' +
+      'ever answered by calling again, not delivered when the event occurs. Design any ' +
+      'GMing workflow around polling at the right moments (after a player says they acted, ' +
+      'before deciding an NPC turn), not around waiting for an update.',
+  },
+  {
     title: 'Exactly one tool is irreversible, and it is built inside out',
     body:
       'Deleting documents puts them somewhere a person can still get at — Foundry keeps the ' +
@@ -323,6 +333,48 @@ const BUILTIN_RECIPES: NoteRecipe[] = [
       '`updateByName`:true — without that flag a re-run appends duplicates rather than ' +
       'updating.',
   },
+  {
+    id: 'run-a-live-encounter',
+    title: 'Run a live combat encounter turn by turn',
+    when: 'GMing an active fight, not just prepping one.',
+    steps: [
+      'Before the fight: `manage-combat` action:"add-combatants" with the scene `tokenIds`, ' +
+        'then action:"roll-initiative" (omit `combatantIds`/`npcsOnly` to roll for everyone ' +
+        'without initiative yet), then action:"start".',
+      'Each turn: action:"get" to see whose turn it is, current HP, and conditions before ' +
+        'deciding an NPC action or narrating a result.',
+      "After the current combatant acts (yours or a player's): `list-chat-log` to see what " +
+        'was actually rolled/posted, then `manage-combat` action:"next-turn".',
+      'Mark a kill with action:"toggle-defeated" on that combatant\'s id so the tracker (and ' +
+        'a later "get") reflects it.',
+      'action:"end" when the fight is over.',
+    ],
+    notes:
+      'There is no push channel from Foundry to an MCP client — "get" and "list-chat-log" are ' +
+      'both pulls. Call them again after something happens; nothing is delivered on its own. ' +
+      'A player rolling their own initiative at the table is `set-initiative`, not a fresh roll.',
+  },
+  {
+    id: 'debug-a-foundry-module',
+    title: 'Debug a Foundry module while developing it',
+    when:
+      'Building or fixing a module in this ecosystem (this bridge or any other) and something ' +
+      'is not behaving, rather than asking the user to open DevTools and paste an error.',
+    steps: [
+      "`get-module-diagnostics` first — Foundry/system versions, every installed module's id " +
+        'and version (confirms which build is actually loaded; a rebuild that was not deployed ' +
+        'looks identical from the outside otherwise), and recent captured errors/warnings.',
+      'If `recentErrors` is empty but something is visibly broken, the failure likely predates ' +
+        "this session's world load (the buffer starts empty on every reload) — ask the user to " +
+        'reproduce it once more with the tab open, then call again.',
+      'Cross-reference a module id/version against what you expect to have deployed. A stale ' +
+        'build showing up here explains a lot of "I fixed that already" confusion.',
+    ],
+    notes:
+      'This captures error/warn-level console output plus uncaught exceptions and unhandled ' +
+      'promise rejections only — not routine console.log traffic, and not anything from before ' +
+      'the module loaded.',
+  },
 ];
 
 /**
@@ -349,6 +401,18 @@ const BUILTIN_TOOL_NOTES: Record<string, string> = {
     'The only irreversible tool here. Dry run by default — one call reports, a second with ' +
     '`dryRun`:false and a matching `expectedEntryCount` deletes. World packs only; system and ' +
     'module packs are refused. Takes no backup. See the "delete-a-compendium-pack" recipe.',
+  'manage-combat':
+    'Combat tracker: whose turn, round, initiative order, HP/defeated, and advancing the ' +
+    'encounter. "get" is read-only; every other action needs a GM. There is no push from ' +
+    'Foundry — call "get" again after a player acts. See the "run-a-live-encounter" recipe.',
+  'list-chat-log':
+    'Read-back complement to send-chat-message/roll-dice. Pull-based like manage-combat: ' +
+    'nothing arrives here on its own, call it after a turn to see what was posted.',
+  'get-module-diagnostics':
+    'Foundry/system versions, every installed module with its version and active state, and ' +
+    'recent captured console errors/warnings/uncaught exceptions — for developing and ' +
+    'debugging a Foundry module without asking the user to paste DevTools output. See the ' +
+    '"debug-a-foundry-module" recipe.',
 };
 
 export class DocumentationTools {

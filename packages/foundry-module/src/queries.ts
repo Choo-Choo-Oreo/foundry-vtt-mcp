@@ -151,6 +151,14 @@ export class QueryHandlers {
     CONFIG.queries[`${modulePrefix}.manageJournals`] = this.handleManageJournals.bind(this);
     CONFIG.queries[`${modulePrefix}.sendChatMessage`] = this.handleSendChatMessage.bind(this);
     CONFIG.queries[`${modulePrefix}.rollDice`] = this.handleRollDice.bind(this);
+    CONFIG.queries[`${modulePrefix}.listChatLog`] = this.handleListChatLog.bind(this);
+
+    // Combat tracker
+    CONFIG.queries[`${modulePrefix}.manageCombat`] = this.handleManageCombat.bind(this);
+
+    // Dev/debug diagnostics
+    CONFIG.queries[`${modulePrefix}.getModuleDiagnostics`] =
+      this.handleGetModuleDiagnostics.bind(this);
 
     // Roll tables, macros, images
     CONFIG.queries[`${modulePrefix}.manageRollTables`] = this.handleManageRollTables.bind(this);
@@ -2450,6 +2458,54 @@ export class QueryHandlers {
         `Failed to roll dice: ${error instanceof Error ? error.message : 'Unknown error'}`
       );
     }
+  }
+
+  private async handleListChatLog(data: {
+    limit?: number;
+    sinceId?: string;
+    rollsOnly?: boolean;
+  }): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      this.dataAccess.validateFoundryState();
+
+      return await this.dataAccess.listChatLog(data ?? {});
+    } catch (error) {
+      throw new Error(
+        `Failed to list chat log: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  private async handleManageCombat(data: {
+    action: string;
+    combatId?: string;
+    combatantIds?: string[];
+    tokenIds?: string[];
+    initiative?: number;
+    formula?: string;
+    npcsOnly?: boolean;
+  }): Promise<any> {
+    // "get" is read-only; every other action changes the encounter and is GM-gated,
+    // the same split manage-folders uses for "list" vs its write actions.
+    if (data?.action !== 'get') {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+    }
+
+    this.dataAccess.validateFoundryState();
+    return this.dataAccess.manageCombat(data ?? { action: 'get' });
+  }
+
+  private async handleGetModuleDiagnostics(data?: { limit?: number }): Promise<any> {
+    this.dataAccess.validateFoundryState();
+    return this.dataAccess.getModuleDiagnostics(data);
   }
 
   private async handleManageRollTables(data: { action: string; [k: string]: any }): Promise<any> {

@@ -1,6 +1,7 @@
 import { MODULE_ID, ERROR_MESSAGES, TOKEN_DISPOSITIONS } from './constants.js';
 import { permissionManager } from './permissions.js';
 import { transactionManager } from './transaction-manager.js';
+import { getDiagnosticEntries } from './diagnostics.js';
 // Local type definitions to avoid shared package import issues
 interface CharacterInfo {
   id: string;
@@ -3886,6 +3887,42 @@ export class FoundryDataAccess {
         active: user.active,
         isGM: user.isGM,
       })),
+    };
+  }
+
+  /**
+   * Module/system versions, active-module inventory, and recent captured
+   * errors/warnings — for developing modules against this bridge (or anything
+   * else running in this Foundry tab), not for the bridge's own health.
+   *
+   * The error buffer is captured by `diagnostics.ts` from the moment this
+   * module loaded; it is empty after every world reload, not a persistent log.
+   */
+  async getModuleDiagnostics(params?: { limit?: number }): Promise<{
+    foundryVersion: string;
+    system: { id: string; version: string };
+    modules: Array<{ id: string; title: string; version: string; active: boolean }>;
+    recentErrors: Array<{
+      timestamp: string;
+      level: string;
+      message: string;
+      source?: string | undefined;
+    }>;
+  }> {
+    this.validateFoundryState();
+
+    const modules = Array.from((game as any).modules?.values?.() ?? []).map((m: any) => ({
+      id: m.id,
+      title: m.title ?? m.id,
+      version: m.version ?? 'unknown',
+      active: !!m.active,
+    }));
+
+    return {
+      foundryVersion: game.version,
+      system: { id: game.system.id, version: game.system.version },
+      modules,
+      recentErrors: getDiagnosticEntries(params?.limit),
     };
   }
 
@@ -11835,6 +11872,278 @@ export class FoundryDataAccess {
       speaker: actor?.name ?? null,
       rollMode,
     };
+  }
+
+  /**
+   * Read back recent chat log entries. The only read-path complement to
+   * sendChatMessage/rollDice — without it, "what did the player just do" had no
+   * answer besides asking the GM to type it out.
+   */
+  async listChatLog(params: { limit?: number; sinceId?: string; rollsOnly?: boolean }): Promise<{
+    entries: Array<{
+      id: string;
+      timestamp: string;
+      speaker: string | null;
+      content: string;
+      flavor: string | null;
+      isRoll: boolean;
+      rolls: Array<{ formula: string; total: number }>;
+      whisperedTo: string[];
+    }>;
+    total: number;
+  }> {
+    this.validateFoundryState();
+
+    const all: any[] = Array.from((game as any).messages?.contents ?? []);
+
+    let source = all;
+    if (params.sinceId) {
+      const idx = all.findIndex(m => m.id === params.sinceId);
+      // Unknown sinceId: treat as "nothing missed yet" rather than guessing a
+      // count, so a stale/typo'd id cannot silently dump the whole log.
+      source = idx === -1 ? [] : all.slice(idx + 1);
+    }
+
+    const mapped = source.map((m: any) => {
+      const rolls = (m.rolls ?? []).map((r: any) => ({
+        formula: r.formula ?? '',
+        total: typeof r.total === 'number' ? r.total : 0,
+      }));
+      const speakerActorId = m.speaker?.actor;
+      const speakerName =
+        m.speaker?.alias ??
+        (speakerActorId ? (game as any).actors?.get(speakerActorId)?.name : null) ??
+        m.author?.name ??
+        m.user?.name ??
+        null;
+
+      return {
+        id: m.id,
+        timestamp: new Date(m.timestamp ?? Date.now()).toISOString(),
+        speaker: speakerName,
+        content: m.content ?? '',
+        flavor: m.flavor ?? null,
+        isRoll: rolls.length > 0,
+        rolls,
+        whisperedTo: (m.whisper ?? []).map(
+          (id: string) => (game as any).users?.get(id)?.name ?? id
+        ),
+      };
+    });
+
+    const filtered = params.rollsOnly ? mapped.filter(m => m.isRoll) : mapped;
+    const limited = params.sinceId
+      ? filtered
+      : filtered.slice(Math.max(0, filtered.length - (params.limit ?? 20)));
+
+    return { entries: limited, total: filtered.length };
+  }
+
+  /**
+   * The active combat encounter: whose turn it is, initiative order, HP and
+   * defeated state, and the handful of actions that advance it. See
+   * manageCombat's tool description for the full action list.
+   *
+   * `game.combat` is Foundry's own "the encounter currently being viewed"
+   * getter — the same one the built-in Combat Tracker sidebar uses — so this
+   * follows the same target a GM looking at their own screen would.
+   */
+  async manageCombat(params: {
+    action: string;
+    combatId?: string;
+    combatantIds?: string[];
+    tokenIds?: string[];
+    initiative?: number;
+    formula?: string;
+    npcsOnly?: boolean;
+  }): Promise<any> {
+    this.validateFoundryState();
+
+    const resolveCombat = (combatId?: string): any => {
+      if (combatId) {
+        const c = (game as any).combats?.get(combatId);
+        if (!c) throw new Error(`Combat not found: ${combatId}`);
+        return c;
+      }
+      return (game as any).combat ?? null;
+    };
+
+    const combatantSnapshot = (c: any) => {
+      const actor = c.actor ?? null;
+      const hp = actor?.system?.attributes?.hp ?? null;
+      return {
+        id: c.id,
+        name: c.name ?? actor?.name ?? 'Unknown',
+        actorId: c.actorId ?? null,
+        tokenId: c.tokenId ?? null,
+        initiative: c.initiative ?? null,
+        hidden: !!c.hidden,
+        defeated: !!(c.isDefeated ?? c.defeated),
+        isNPC: actor ? !actor.hasPlayerOwner : null,
+        hp: hp ? { value: hp.value ?? null, max: hp.max ?? null } : null,
+      };
+    };
+
+    const describe = (combat: any) => {
+      if (!combat) {
+        return {
+          active: false,
+          combatId: null,
+          round: 0,
+          turn: null,
+          current: null,
+          combatants: [],
+        };
+      }
+      const turns: any[] = combat.turns ?? [];
+      const turnIndex: number | null = combat.turn ?? null;
+      const current =
+        turnIndex !== null && turns[turnIndex] ? combatantSnapshot(turns[turnIndex]) : null;
+      return {
+        active: true,
+        combatId: combat.id,
+        started: !!combat.started,
+        round: combat.round ?? 0,
+        turn: turnIndex,
+        current,
+        combatants: turns.map(combatantSnapshot),
+      };
+    };
+
+    const action = params.action ?? 'get';
+
+    if (action === 'get') {
+      return describe(resolveCombat(params.combatId));
+    }
+
+    if (action === 'start') {
+      let combat = resolveCombat(params.combatId);
+      if (!combat) {
+        const scene = (game.scenes as any).current;
+        combat = await (Combat as any).create({ scene: scene?.id ?? null });
+        if (!combat) throw new Error('Foundry did not create a Combat document.');
+      }
+      await combat.startCombat();
+      this.auditLog('manageCombat.start', { combatId: combat.id }, 'success');
+      return describe(combat);
+    }
+
+    const combat = resolveCombat(params.combatId);
+    if (!combat) {
+      throw new Error(
+        `No active combat${params.combatId ? ` (${params.combatId})` : ''}. Use action:"start" first.`
+      );
+    }
+
+    switch (action) {
+      case 'end': {
+        if (typeof combat.endCombat === 'function') {
+          await combat.endCombat();
+        } else {
+          await combat.delete();
+        }
+        this.auditLog('manageCombat.end', { combatId: combat.id }, 'success');
+        return { ended: true, combatId: combat.id };
+      }
+
+      case 'next-turn':
+        await combat.nextTurn();
+        break;
+
+      case 'previous-turn':
+        await combat.previousTurn();
+        break;
+
+      case 'next-round':
+        await combat.nextRound();
+        break;
+
+      case 'previous-round':
+        await combat.previousRound();
+        break;
+
+      case 'roll-initiative': {
+        const options = params.formula ? { formula: params.formula } : undefined;
+        if (params.combatantIds?.length) {
+          await combat.rollInitiative(params.combatantIds, options);
+        } else if (params.npcsOnly) {
+          await combat.rollNPC(options);
+        } else {
+          await combat.rollAll(options);
+        }
+        break;
+      }
+
+      case 'set-initiative': {
+        const id = params.combatantIds?.[0];
+        if (!id) throw new Error('set-initiative requires combatantIds[0]');
+        if (typeof params.initiative !== 'number') {
+          throw new Error('set-initiative requires a numeric initiative');
+        }
+        if (typeof combat.setInitiative === 'function') {
+          await combat.setInitiative(id, params.initiative);
+        } else {
+          const c = combat.combatants.get(id);
+          if (!c) throw new Error(`Combatant not found: ${id}`);
+          await c.update({ initiative: params.initiative });
+        }
+        break;
+      }
+
+      case 'add-combatants': {
+        if (!params.tokenIds?.length) throw new Error('add-combatants requires tokenIds');
+        const scene = (game.scenes as any).current;
+        if (!scene) throw new Error('No active scene found');
+        const notFound: string[] = [];
+        const creates: any[] = [];
+        for (const tokenId of params.tokenIds) {
+          const token = scene.tokens.get(tokenId);
+          if (!token) {
+            notFound.push(tokenId);
+            continue;
+          }
+          creates.push({ tokenId: token.id, sceneId: scene.id });
+        }
+        if (creates.length === 0) {
+          throw new Error(
+            `No matching tokens found on the current scene: ${params.tokenIds.join(', ')}`
+          );
+        }
+        await combat.createEmbeddedDocuments('Combatant', creates);
+        this.auditLog('manageCombat.add-combatants', { count: creates.length }, 'success');
+        return { ...describe(combat), notFound };
+      }
+
+      case 'remove-combatants': {
+        if (!params.combatantIds?.length)
+          throw new Error('remove-combatants requires combatantIds');
+        await combat.deleteEmbeddedDocuments('Combatant', params.combatantIds);
+        this.auditLog(
+          'manageCombat.remove-combatants',
+          { count: params.combatantIds.length },
+          'success'
+        );
+        break;
+      }
+
+      case 'toggle-defeated': {
+        if (!params.combatantIds?.length) throw new Error('toggle-defeated requires combatantIds');
+        for (const id of params.combatantIds) {
+          const c = combat.combatants.get(id);
+          if (!c) throw new Error(`Combatant not found: ${id}`);
+          await c.update({ defeated: !(c.isDefeated ?? c.defeated) });
+        }
+        break;
+      }
+
+      default:
+        throw new Error(
+          `Unknown manage-combat action: ${action}. See the tool description for valid actions.`
+        );
+    }
+
+    this.auditLog('manageCombat', { action, combatId: combat.id }, 'success');
+    return describe(combat);
   }
 
   // ---------------------------------------------------------------------------

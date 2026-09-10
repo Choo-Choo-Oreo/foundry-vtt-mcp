@@ -4,7 +4,12 @@ import { QueryHandlers } from './queries.js';
 import { ModuleSettings } from './settings.js';
 import { CampaignHooks } from './campaign-hooks.js';
 import { ComfyUIManager } from './comfyui-manager.js';
+import { installDiagnosticsCapture } from './diagnostics.js';
 // Connection control now handled through settings menu
+
+// Installed at module load, before any hook fires, so an error during init
+// itself is still caught by get-module-diagnostics.
+installDiagnosticsCapture(MODULE_ID);
 
 /**
  * Main Foundry MCP Bridge Module Class
