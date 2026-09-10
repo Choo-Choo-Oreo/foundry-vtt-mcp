@@ -134,7 +134,11 @@ export class ChatTools {
                 'a flat count — the way to catch up on everything missed since last checking, ' +
                 "without re-reading old messages. If the response's `total` is larger than the " +
                 'number of entries returned, more are waiting — call again with sinceId set to ' +
-                "the last entry's id to get the next page.",
+                "the last entry's id to get the next page. Reliable only while the GM's Foundry " +
+                'tab has stayed open the whole time — Foundry only keeps a recent window of chat ' +
+                'loaded client-side, so a tab reload can make an old sinceId come back empty ' +
+                "(nothing missed) even though messages happened; that's messages rolling out of " +
+                'the loaded window, not proof nothing was said.',
             },
             rollsOnly: {
               type: 'boolean',

@@ -11934,10 +11934,17 @@ export class FoundryDataAccess {
     const filtered = params.rollsOnly ? mapped.filter(m => m.isRoll) : mapped;
     const limit = params.limit ?? 20;
     // sinceId means "catch up on what I missed" - take the OLDEST `limit`
-    // entries after sinceId (not the newest), so nothing in between is
-    // silently skipped and a caller can page forward by passing the last
-    // returned entry's id back in as the next sinceId. Without sinceId this
-    // is "what just happened" instead, so the newest `limit` is right there.
+    // entries after sinceId (not the newest), so nothing in the returned
+    // window is silently skipped and a caller can page forward by passing
+    // the last returned entry's id back in as the next sinceId. Without
+    // sinceId this is "what just happened" instead, so the newest `limit`
+    // is right there.
+    // Caveat this does NOT cover: game.messages only holds whatever Foundry
+    // has lazily loaded into the client (CONFIG.ChatMessage.batchSize), not
+    // full server history - if the GM's tab reloads between calls, an old
+    // sinceId can come back as "not found" (empty page) even though messages
+    // genuinely happened, because they rolled out of the loaded window, not
+    // because nothing happened. See list-chat-log's tool description.
     const limited = params.sinceId
       ? filtered.slice(0, limit)
       : filtered.slice(Math.max(0, filtered.length - limit));
