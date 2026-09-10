@@ -56,6 +56,32 @@
  * both expose a public `actor.hasCondition(id)` (used to detect current
  * state), everything else reuses the same effects-array scan the generic
  * remove branch already does.
+ *
+ * Round 14 (2026-09-10) found the generic/D&D5e branch built above (a
+ * hand-built ActiveEffect, matched by an unbounded `effect.statuses?.has(id)`
+ * scan with no size check) was a real, destructive divergence from core
+ * Foundry's own generic Actor#toggleStatusEffect (client/documents/
+ * actor.mjs:552-584, actually-installed v14.361.0 client): D&D5e's
+ * paralyzed/petrified/stunned status configs each declare an implicit
+ * companion status (`statuses: ["incapacitated"]`, dnd5e.mjs ~47242-47279)
+ * that a real effect's `.statuses` Set carries alongside the primary id
+ * (active-effect.mjs ~127-138) - so the old unbounded scan, asked to remove
+ * "incapacitated" while the actor was actually "paralyzed", matched the
+ * paralyzed effect's `.statuses` Set (which contains "incapacitated" too)
+ * and deleted the WHOLE paralyzed effect, silently un-paralyzing the actor
+ * as a side effect of a call that only asked to clear "incapacitated" -
+ * while the response still unconditionally claimed only "incapacitated" was
+ * removed. Core Foundry's real method avoids this by looking the effect up
+ * via the status's own static `_id` first (D&D5e sets one on every entry,
+ * dnd5e.mjs ~82738) and restricting its no-`_id` fallback scan to
+ * `statuses.size === 1` (actor.mjs:557-568) - a compound effect is never a
+ * match for one of its component statuses. Fixed by delegating the
+ * generic/D&D5e ADD and REMOVE branches to `actor.toggleStatusEffect(id,
+ * {active})` itself, and by resolving the omitted-`active` current-state
+ * check via the real aggregate `Actor#statuses` Set (actor.mjs ~94-97,260)
+ * instead of the same unbounded scan, falling back to the old hand-rolled
+ * behavior only for an Actor with no `toggleStatusEffect`/`.statuses` at
+ * all (not expected on any v11+ system).
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -313,12 +339,18 @@ describe('FoundryDataAccess.toggleTokenCondition', () => {
     });
   });
 
-  describe('dnd5e (unaffected by the pf2e fix)', () => {
+  describe('generic system with no actor.toggleStatusEffect (last-resort fallback, not expected on any real v11+ system)', () => {
     let actor: any;
     let token: any;
 
     beforeEach(() => {
-      // Core Foundry / D&D5e's CONFIG.statusEffects is an array.
+      // Core Foundry / D&D5e's CONFIG.statusEffects is an array. This mock
+      // actor deliberately omits toggleStatusEffect to exercise the
+      // last-resort hand-built-ActiveEffect branch - round 14 found real
+      // D&D5e actors always have toggleStatusEffect (dnd5e.mjs ~39476, an
+      // override of the core method), so this path is a defensive fallback
+      // only, not what a real D&D5e/dnd5e-like actor hits. See the
+      // "dnd5e (round 14" describe block below for the realistic case.
       stubGame('dnd5e', [{ id: 'prone', name: 'Prone', icon: 'prone.webp' }]);
       actor = {
         createEmbeddedDocuments: vi.fn(async () => [{}]),
@@ -334,7 +366,7 @@ describe('FoundryDataAccess.toggleTokenCondition', () => {
       dataAccess = new FoundryDataAccess();
     });
 
-    it('still applies the condition as an ActiveEffect', async () => {
+    it('applies the condition as a hand-built ActiveEffect when actor.toggleStatusEffect is unavailable', async () => {
       const result = await dataAccess.toggleTokenCondition({
         tokenId: 'tok1',
         conditionId: 'prone',
@@ -347,7 +379,7 @@ describe('FoundryDataAccess.toggleTokenCondition', () => {
       expect(result.success).toBe(true);
     });
 
-    it('still removes the condition by deleting the matching ActiveEffect', async () => {
+    it('removes the condition by scanning+deleting the matching ActiveEffect when actor.toggleStatusEffect is unavailable', async () => {
       const result = await dataAccess.toggleTokenCondition({
         tokenId: 'tok1',
         conditionId: 'prone',
@@ -358,11 +390,10 @@ describe('FoundryDataAccess.toggleTokenCondition', () => {
       expect(result.success).toBe(true);
     });
 
-    it('with `active` omitted, removes the condition by scanning actor.effects when it is already present (round 13)', async () => {
-      // The beforeEach effects.contents already carries a matching 'prone'
-      // ActiveEffect - the generic branch has no hasCondition() to call, so
-      // round 13's toggle-resolution must fall back to the same
-      // effects-array scan the existing remove branch already uses.
+    it('with `active` omitted, removes the condition by scanning actor.effects when no actor.statuses Set exists (round 13)', async () => {
+      // No actor.statuses Set on this mock either, so round 14's preferred
+      // resolution path also falls back to the same effects-array scan the
+      // existing remove branch already uses.
       const result = await dataAccess.toggleTokenCondition({
         tokenId: 'tok1',
         conditionId: 'prone',
@@ -384,6 +415,102 @@ describe('FoundryDataAccess.toggleTokenCondition', () => {
         expect.objectContaining({ statuses: ['prone'] }),
       ]);
       expect(result.isActive).toBe(true);
+    });
+  });
+
+  describe('dnd5e (round 14: real actor.toggleStatusEffect delegation)', () => {
+    let toggleStatusEffect: ReturnType<typeof vi.fn>;
+    let actor: any;
+    let token: any;
+
+    beforeEach(() => {
+      // A realistic D&D5e-like actor: toggleStatusEffect exists (every real
+      // Actor inherits or overrides it, dnd5e.mjs ~39476-39486), so this must
+      // be preferred over the last-resort hand-built-ActiveEffect branch.
+      stubGame('dnd5e', [
+        { id: 'incapacitated', name: 'Incapacitated', icon: 'incapacitated.webp' },
+      ]);
+      toggleStatusEffect = vi.fn(async () => true);
+      actor = {
+        toggleStatusEffect,
+        createEmbeddedDocuments: vi.fn(),
+        deleteEmbeddedDocuments: vi.fn(),
+        // A real "paralyzed" ActiveEffect's .statuses Set also carries its
+        // implicit companion status "incapacitated" (dnd5e.mjs
+        // ~47242-47279 declares `statuses: ["incapacitated"]` on the
+        // paralyzed/petrified/stunned configs; ActiveEffect.fromStatusEffect
+        // folds it in, active-effect.mjs ~127-138) - present here purely to
+        // prove the fix never reaches the old unbounded scan that would have
+        // matched and deleted this whole compound effect.
+        effects: {
+          contents: [{ id: 'eff-paralyzed', statuses: new Set(['paralyzed', 'incapacitated']) }],
+        },
+      };
+      token = { id: 'tok1', name: 'Fighter', actor };
+      (globalThis as any).game.scenes = {
+        current: { tokens: { get: () => token } },
+      };
+      dataAccess = new FoundryDataAccess();
+    });
+
+    it('applies a condition via actor.toggleStatusEffect, not a hand-built ActiveEffect', async () => {
+      const result = await dataAccess.toggleTokenCondition({
+        tokenId: 'tok1',
+        conditionId: 'incapacitated',
+        active: true,
+      });
+
+      expect(toggleStatusEffect).toHaveBeenCalledWith('incapacitated', { active: true });
+      expect(actor.createEmbeddedDocuments).not.toHaveBeenCalled();
+      expect(result.success).toBe(true);
+    });
+
+    it('removes a condition via actor.toggleStatusEffect, never by scanning+deleting a compound effect it belongs to (round 14 regression)', async () => {
+      // Before the fix: the old unbounded `effect.statuses?.has(id)` scan
+      // would match this "paralyzed" effect (its Set contains
+      // "incapacitated" too) and delete the WHOLE effect, silently
+      // un-paralyzing the actor for a call that only asked to clear
+      // "incapacitated". The fix must delegate to toggleStatusEffect and
+      // never call deleteEmbeddedDocuments directly here.
+      const result = await dataAccess.toggleTokenCondition({
+        tokenId: 'tok1',
+        conditionId: 'incapacitated',
+        active: false,
+      });
+
+      expect(toggleStatusEffect).toHaveBeenCalledWith('incapacitated', { active: false });
+      expect(actor.deleteEmbeddedDocuments).not.toHaveBeenCalled();
+      expect(result.success).toBe(true);
+    });
+
+    it('with `active` omitted, resolves current state via the real aggregate actor.statuses Set, not the unbounded effects scan (round 14)', async () => {
+      // actor.statuses (client/documents/actor.mjs ~94-97,260) is the real
+      // "is this status currently in effect, from any source" answer -
+      // populated from every effect's own .statuses during
+      // applyActiveEffects. Here it says "incapacitated" is NOT active even
+      // though a compound effect's .statuses Set contains it, which is
+      // exactly the case the old unbounded scan would have gotten wrong.
+      actor.statuses = new Set(['paralyzed']);
+
+      const result = await dataAccess.toggleTokenCondition({
+        tokenId: 'tok1',
+        conditionId: 'incapacitated',
+      });
+
+      expect(toggleStatusEffect).toHaveBeenCalledWith('incapacitated', { active: true });
+      expect(result.isActive).toBe(true);
+    });
+
+    it('with `active` omitted and actor.statuses showing the condition active, toggles it off via toggleStatusEffect (round 14)', async () => {
+      actor.statuses = new Set(['paralyzed', 'incapacitated']);
+
+      const result = await dataAccess.toggleTokenCondition({
+        tokenId: 'tok1',
+        conditionId: 'incapacitated',
+      });
+
+      expect(toggleStatusEffect).toHaveBeenCalledWith('incapacitated', { active: false });
+      expect(result.isActive).toBe(false);
     });
   });
 });

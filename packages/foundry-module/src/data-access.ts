@@ -9003,11 +9003,37 @@ export class FoundryDataAccess {
       // e)}`, already used by the dsa5 remove branch below), falling back to
       // the same effects-array scan the generic remove branch already uses
       // for every other system.
+      // Audit round 14 (2026-09-10) found the generic/D&D5e current-state
+      // scan below matched on `effect.statuses?.has(id)` alone, with no
+      // check that the matched effect is a SINGLE-status effect for this
+      // id. Core Foundry's own equivalent check (Actor#toggleStatusEffect,
+      // client/documents/actor.mjs:563-568, actually-installed v14.361.0
+      // client) explicitly restricts its no-static-`_id` fallback scan to
+      // `statuses.size === 1` - deliberately, because a real compound
+      // effect's `.statuses` Set can legitimately contain MORE ids than the
+      // one you're asking about. D&D5e's own paralyzed/petrified/stunned
+      // status configs each declare an implicit companion status
+      // (`statuses: ["incapacitated"]`, dnd5e.mjs ~47242-47279) that
+      // `ActiveEffect.fromStatusEffect()` folds into the real effect's
+      // `.statuses` Set alongside the primary id (active-effect.mjs
+      // ~130-135) - so a live "paralyzed" effect's `.statuses` Set is
+      // `{"paralyzed","incapacitated"}`. See the ADD/REMOVE branches below
+      // for why the old unbounded scan was actively destructive on a WRITE,
+      // not just imprecise on a read. Prefer the real aggregate
+      // `Actor#statuses` Set (client/documents/actor.mjs ~94-97,260:
+      // populated from every effect's own `.statuses` during
+      // `applyActiveEffects`) when available - it is exactly the "is this
+      // status currently in effect, from any source" answer the
+      // toggle-when-omitted case wants - and fall back to the old unbounded
+      // scan only for an Actor with no `.statuses` Set at all (not expected
+      // on any v11+ system).
       let resolvedActive: boolean;
       if (typeof data.active === 'boolean') {
         resolvedActive = data.active;
       } else if ((isPf2e || isDsa5) && typeof actor.hasCondition === 'function') {
         resolvedActive = !actor.hasCondition(condition.id);
+      } else if (actor.statuses && typeof actor.statuses.has === 'function') {
+        resolvedActive = !actor.statuses.has(condition.id);
       } else {
         const currentEffects = actor.effects?.contents || [];
         const isCurrentlyActive = currentEffects.some((effect: any) => {
@@ -9030,8 +9056,32 @@ export class FoundryDataAccess {
           await actor.toggleStatusEffect(condition.id, { active: true });
         } else if (isDsa5) {
           await actor.addCondition(condition.id);
+        } else if (typeof actor.toggleStatusEffect === 'function') {
+          // Audit round 14 (2026-09-10): delegate to the real generic
+          // Actor#toggleStatusEffect(id, {active}) (client/documents/
+          // actor.mjs:552-584, actually-installed v14.361.0 client - every
+          // Actor in every system that doesn't replace the condition API
+          // entirely inherits this; D&D5e uses it via its own subclass
+          // override, dnd5e.mjs ~39476-39486) instead of hand-building a
+          // bare ActiveEffect. The real method builds the effect from the
+          // FULL CONFIG.statusEffects entry via ActiveEffect.fromStatusEffect
+          // (active-effect.mjs ~127-138), which folds in any implicit
+          // companion statuses the entry declares (D&D5e's paralyzed/
+          // petrified/stunned each carry `statuses: ["incapacitated"]`,
+          // dnd5e.mjs ~47242-47279) that the old hand-built effect never set
+          // - so a rule gated on `actor.statuses.has("incapacitated")` would
+          // never fire for a "paralyzed" token applied through this tool.
+          // It also reuses the status's static `_id` (dnd5e.mjs ~82738:
+          // `data._id = staticID('dnd5e'+data.id)`, set for every entry) so
+          // re-applying an already-active status is a safe no-op instead of
+          // creating a duplicate effect, and D&D5e's own override
+          // additionally clears any other effect sharing the same
+          // `exclusiveGroup` (used by its cover statuses) - none of which
+          // the old hand-rolled branch did.
+          await actor.toggleStatusEffect(condition.id, { active: true });
         } else {
-          // Add the condition - handle other systems generically (D&D5e etc.)
+          // Last-resort fallback for an Actor with no toggleStatusEffect at
+          // all (not expected on any v11+ system) - handle generically.
           const effectData: any = {
             name: condition.name || condition.label || condition.id,
             icon: condition.icon || condition.img,
@@ -9052,8 +9102,30 @@ export class FoundryDataAccess {
           if (existing) {
             await actor.deleteEmbeddedDocuments('ActiveEffect', [existing.id]);
           }
+        } else if (typeof actor.toggleStatusEffect === 'function') {
+          // Audit round 14 (2026-09-10): the old unbounded scan below
+          // (`effect.statuses?.has(data.conditionId)`) matched ANY effect
+          // whose `.statuses` Set contains this id, including a COMPOUND
+          // effect where it's only an implicit companion status - e.g.
+          // asking to remove "incapacitated" while the actor was actually
+          // "paralyzed" (whose real effect's `.statuses` Set is
+          // `{"paralyzed","incapacitated"}`, see the ADD-branch comment
+          // above) matched the paralyzed effect and deleted THE WHOLE
+          // THING, silently un-paralyzing the actor as a side effect of a
+          // call that only asked to clear "incapacitated" - while the
+          // tool's own response still unconditionally claimed only
+          // "incapacitated" was removed. Core Foundry's real
+          // Actor#toggleStatusEffect avoids this exactly: it looks the
+          // effect up by the status's own static `_id` first, and its
+          // no-static-`_id` fallback scan is explicitly restricted to
+          // `statuses.size === 1` (client/documents/actor.mjs:557-568) - a
+          // compound effect is never a match for one of its component
+          // statuses under that rule. Delegate to it instead of
+          // re-deriving this lookup by hand.
+          await actor.toggleStatusEffect(condition.id, { active: false });
         } else {
-          // Remove the condition
+          // Last-resort fallback for an Actor with no toggleStatusEffect at
+          // all (not expected on any v11+ system) - handle generically.
           const effects = actor.effects?.contents || [];
           const effectsToRemove = effects.filter((effect: any) => {
             // Check by status (D&D5e, PF2e)
