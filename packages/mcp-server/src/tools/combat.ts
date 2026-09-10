@@ -30,6 +30,7 @@ const COMBAT_ACTIONS = [
   'add-combatants',
   'remove-combatants',
   'toggle-defeated',
+  'toggle-hidden',
 ] as const;
 
 export interface CombatToolsOptions {
@@ -69,6 +70,8 @@ export class CombatTools {
           '- "remove-combatants": drop `combatantIds` from the encounter (does not delete the ' +
           'tokens/actors — only their combat-tracker entry).\n' +
           '- "toggle-defeated": flip the defeated marker on `combatantIds`.\n' +
+          '- "toggle-hidden": flip the hidden state on `combatantIds` (e.g. hide an ambusher ' +
+          "from the tracker until it's revealed).\n" +
           'There is no push channel from Foundry — call "get" again after a player acts to see ' +
           'what changed; it is not delivered automatically.',
         inputSchema: {
@@ -90,7 +93,7 @@ export class CombatTools {
               items: { type: 'string' },
               description:
                 'Combatant ids (from "get") — used by roll-initiative, set-initiative (first ' +
-                'entry only), remove-combatants, and toggle-defeated.',
+                'entry only), remove-combatants, toggle-defeated, and toggle-hidden.',
             },
             tokenIds: {
               type: 'array',

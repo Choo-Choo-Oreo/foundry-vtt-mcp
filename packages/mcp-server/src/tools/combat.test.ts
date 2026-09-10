@@ -44,6 +44,7 @@ describe('CombatTools.getToolDefinitions', () => {
       'add-combatants',
       'remove-combatants',
       'toggle-defeated',
+      'toggle-hidden',
     ]);
   });
 });
@@ -91,5 +92,14 @@ describe('manage-combat', () => {
     await expect(tools.handleManageCombat({ action: 'next-turn' })).rejects.toThrow(
       /manage-combat "next-turn" failed/
     );
+  });
+
+  it('forwards combatantIds for toggle-hidden', async () => {
+    const { tools, query } = makeTools();
+    await tools.handleManageCombat({ action: 'toggle-hidden', combatantIds: ['k1'] });
+    expect(query).toHaveBeenCalledWith('foundry-mcp-bridge.manageCombat', {
+      action: 'toggle-hidden',
+      combatantIds: ['k1'],
+    });
   });
 });

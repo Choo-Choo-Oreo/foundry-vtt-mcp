@@ -97,6 +97,21 @@ export function installDiagnosticsCapture(source: string): void {
       });
     });
   }
+
+  // Foundry core routes errors from wrapped internal call sites (hook callbacks,
+  // scene/canvas rendering, etc.) through Hooks.onError -> Hooks.call("error", ...)
+  // with a location tag, instead of always letting them reach window.onerror. Without
+  // this, some Foundry-trapped errors never appear in the buffer at all.
+  if (typeof Hooks !== 'undefined') {
+    Hooks.on('error', (location: string, error: unknown, _options?: unknown) => {
+      push({
+        timestamp: new Date().toISOString(),
+        level: 'uncaught',
+        message: stringifyArg(error),
+        source: location,
+      });
+    });
+  }
 }
 
 /** Most recent entries first, optionally limited. Does not clear the buffer. */

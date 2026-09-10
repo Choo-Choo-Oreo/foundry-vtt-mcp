@@ -11932,9 +11932,11 @@ export class FoundryDataAccess {
     });
 
     const filtered = params.rollsOnly ? mapped.filter(m => m.isRoll) : mapped;
-    const limited = params.sinceId
-      ? filtered
-      : filtered.slice(Math.max(0, filtered.length - (params.limit ?? 20)));
+    // sinceId still respects limit, capped to the most recent `limit` entries
+    // since sinceId (not the oldest), so a long-absent caller gets a bounded
+    // response instead of a multi-hundred-entry dump.
+    const limit = params.limit ?? 20;
+    const limited = filtered.slice(Math.max(0, filtered.length - limit));
 
     return { entries: limited, total: filtered.length };
   }
@@ -12037,11 +12039,10 @@ export class FoundryDataAccess {
 
     switch (action) {
       case 'end': {
-        if (typeof combat.endCombat === 'function') {
-          await combat.endCombat();
-        } else {
-          await combat.delete();
-        }
+        // Combat#endCombat() is a UI confirmation dialog ("are you sure?"),
+        // not a headless end - it doesn't resolve until a human clicks it.
+        // delete() is the real headless call.
+        await combat.delete();
         this.auditLog('manageCombat.end', { combatId: combat.id }, 'success');
         return { ended: true, combatId: combat.id };
       }
@@ -12132,6 +12133,16 @@ export class FoundryDataAccess {
           const c = combat.combatants.get(id);
           if (!c) throw new Error(`Combatant not found: ${id}`);
           await c.update({ defeated: !(c.isDefeated ?? c.defeated) });
+        }
+        break;
+      }
+
+      case 'toggle-hidden': {
+        if (!params.combatantIds?.length) throw new Error('toggle-hidden requires combatantIds');
+        for (const id of params.combatantIds) {
+          const c = combat.combatants.get(id);
+          if (!c) throw new Error(`Combatant not found: ${id}`);
+          await c.update({ hidden: !c.hidden });
         }
         break;
       }
