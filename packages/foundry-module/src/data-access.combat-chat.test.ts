@@ -208,6 +208,58 @@ describe('FoundryDataAccess.manageCombat', () => {
     expect(result.combatants[0].hp).toEqual({ value: 14, max: 20 });
   });
 
+  it('get reads HP from MGT2e-shaped actors (system.hits object)', async () => {
+    const c1 = makeCombatant('c1', false, false);
+    c1.actor = { name: 'Scout', system: { hits: { value: 5, max: 8 } } };
+    const combat: any = {
+      id: 'combat1',
+      turns: [c1],
+      combatants: { get: (id: string) => (id === 'c1' ? c1 : undefined) },
+    };
+    (globalThis as any).game.combat = combat;
+
+    const result = await dataAccess.manageCombat({ action: 'get' });
+
+    expect(result.combatants[0].hp).toEqual({ value: 5, max: 8 });
+  });
+
+  it('get reads HP from MGT2e-shaped actors with a bare-number system.hits (both value and max)', async () => {
+    const c1 = makeCombatant('c1', false, false);
+    c1.actor = { name: 'Scout', system: { hits: 8 } };
+    const combat: any = {
+      id: 'combat1',
+      turns: [c1],
+      combatants: { get: (id: string) => (id === 'c1' ? c1 : undefined) },
+    };
+    (globalThis as any).game.combat = combat;
+
+    const result = await dataAccess.manageCombat({ action: 'get' });
+
+    expect(result.combatants[0].hp).toEqual({ value: 8, max: 8 });
+  });
+
+  it('get honors Cosmere useOverride over the raw derived value', async () => {
+    const c1 = makeCombatant('c1', false, false);
+    c1.actor = {
+      name: 'Windrunner',
+      system: {
+        resources: {
+          hea: { value: 14, max: { value: 20, derived: 20, useOverride: true, override: 25 } },
+        },
+      },
+    };
+    const combat: any = {
+      id: 'combat1',
+      turns: [c1],
+      combatants: { get: (id: string) => (id === 'c1' ? c1 : undefined) },
+    };
+    (globalThis as any).game.combat = combat;
+
+    const result = await dataAccess.manageCombat({ action: 'get' });
+
+    expect(result.combatants[0].hp).toEqual({ value: 14, max: 25 });
+  });
+
   it("get returns hp: null rather than guessing when an actor's HP shape is unrecognized", async () => {
     const c1 = makeCombatant('c1', false, false);
     c1.actor = { name: 'Mystery', system: { somethingElse: { totally: 'unrelated' } } };

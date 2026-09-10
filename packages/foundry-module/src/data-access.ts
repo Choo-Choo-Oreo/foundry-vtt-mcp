@@ -11949,7 +11949,11 @@ export class FoundryDataAccess {
     // mechanism. Left as a suspected, unconfirmed risk rather than asserted
     // as fact either way - see list-chat-log-sinceid-reload-completeness in
     // the notes file. If it turns out game.messages is always complete, this
-    // whole caveat can be deleted.
+    // whole caveat can be deleted. Separately, an unresolvable sinceId below
+    // always reads as "nothing missed" regardless of cause - a typo'd id, a
+    // real reload gap (this caveat), or simply that the anchor message was
+    // deleted from chat since (an everyday GM action, arguably more common
+    // than a reload gap) all look identical from here.
     const limited = params.sinceId
       ? filtered.slice(0, limit)
       : filtered.slice(Math.max(0, filtered.length - limit));
@@ -11989,8 +11993,14 @@ export class FoundryDataAccess {
     // pf2e/dnd5e keep HP at system.attributes.hp; WFRP4e at system.status.wounds
     // (data-access.ts wfrp4e actor-write path, ~line 7409); Cosmere RPG at
     // system.resources.hea as DerivedValueField(s) (see readDerived's own doc
-    // comment). Checked in that order so a system matching the first shape
-    // never falls through to a later one.
+    // comment); MGT2e (Traveller) at system.hits, either {value, max} or (rarely,
+    // pre-normalization) a bare number treated as max - same shape already read
+    // at ~line 1455 and written at ~line 11368. Checked in that order so a
+    // system matching an earlier shape never falls through to a later one.
+    // DSA5 is also a fully-supported system but no HP/wounds field for it has
+    // been identified anywhere in this codebase - it silently falls through to
+    // null below rather than being guessed at (see manage-combat-hp-system-
+    // coverage in the notes file).
     const readCombatantHp = (actor: any): { value: number | null; max: number | null } | null => {
       const system = actor?.system;
       if (!system) return null;
@@ -12027,6 +12037,16 @@ export class FoundryDataAccess {
         const max = resolveDerived(hea.max);
         if (value !== undefined || max !== undefined) {
           return { value: value ?? null, max: max ?? null };
+        }
+      }
+
+      const hits = system.hits;
+      if (hits != null) {
+        if (typeof hits === 'number') {
+          return { value: hits, max: hits };
+        }
+        if (typeof hits === 'object' && (hits.value !== undefined || hits.max !== undefined)) {
+          return { value: hits.value ?? null, max: hits.max ?? null };
         }
       }
 
