@@ -5557,6 +5557,21 @@ export class FoundryDataAccess {
   }): Promise<any> {
     this.validateFoundryState();
 
+    // Audit round 15 (2026-09-10): this — the bridge's OWN comment above calls
+    // it "the only irreversible call in the bridge" — never checked
+    // `permissionManager` at all, so "Allow Write Operations" being off
+    // (settings.ts) did nothing to stop it. See the identical fix and full
+    // citation on `deleteWorldItems`, above. Gated on `deleteData`, same tier;
+    // applies to the dryRun preview too, for the same reason every other
+    // `checkWritePermission` call site in this file gates the whole
+    // operation rather than special-casing a read-only-looking branch of it.
+    const permissionCheck = permissionManager.checkWritePermission('deleteData', {
+      targetIds: [params.pack],
+    });
+    if (!permissionCheck.allowed) {
+      throw new Error(`${ERROR_MESSAGES.ACCESS_DENIED}: ${permissionCheck.reason}`);
+    }
+
     const raw = (params.pack ?? '').trim();
     if (!raw) throw new Error('"pack" is required');
 
@@ -5853,12 +5868,34 @@ export class FoundryDataAccess {
    * whole call and removes nothing, rather than silently deleting the subset it
    * recognised. (Contrast `deleteTokens`, which reports `deletedCount: 0` on a
    * bad id and looks like a success.)
+   *
+   * Audit round 15 (2026-09-10) found this permanent delete never consulted
+   * `permissionManager` at all — only `validateFoundryState()` ran, so the
+   * module's own "Allow Write Operations" setting (settings.ts, hint: "Let AI
+   * model create actors, NPCs, and modify world content... Reading is always
+   * allowed") did nothing to stop it: a GM who flips that switch off,
+   * expecting it to block every AI-driven write per its own doc comment in
+   * settings.ts (`isWriteOperationAllowed()`: "single permission covers all
+   * write operations"), could still have world Items permanently deleted.
+   * Every other write path that goes through `checkWritePermission`
+   * (createActor/modifyScene call sites, `deleteTokens` at ~8730) already
+   * respects this setting; this one just never called it. Gated on
+   * `deleteData` (HIGH_RISK, `requiresGM: true` in permissions.ts) — the
+   * correct tier for an irreversible delete, and previously unused by any
+   * real call site (grepped before this fix: zero matches).
    */
   async deleteWorldItems(params: { ids: string[] }): Promise<{
     deleted: Array<{ id: string; name: string; type: string }>;
     total: number;
   }> {
     this.validateFoundryState();
+
+    const permissionCheck = permissionManager.checkWritePermission('deleteData', {
+      targetIds: params.ids,
+    });
+    if (!permissionCheck.allowed) {
+      throw new Error(`${ERROR_MESSAGES.ACCESS_DENIED}: ${permissionCheck.reason}`);
+    }
 
     const { ids } = params;
 
@@ -11880,6 +11917,20 @@ export class FoundryDataAccess {
     actorIdentifier: string,
     itemIds: string[]
   ): Promise<{ deleted: string[]; total: number }> {
+    this.validateFoundryState();
+
+    // Audit round 15 (2026-09-10): had no permission check of any kind — not
+    // even `validateFoundryState()` — so "Allow Write Operations" being off
+    // did nothing to stop a permanent item delete on an actor. Same gap and
+    // fix as `deleteWorldItems`/`deleteCompendiumPack`/`deleteActors` (see
+    // `deleteWorldItems` above for the full citation).
+    const permissionCheck = permissionManager.checkWritePermission('deleteData', {
+      targetIds: itemIds,
+    });
+    if (!permissionCheck.allowed) {
+      throw new Error(`${ERROR_MESSAGES.ACCESS_DENIED}: ${permissionCheck.reason}`);
+    }
+
     const actor =
       (game.actors.get(actorIdentifier) as any) ??
       (game.actors.find(
@@ -11933,6 +11984,20 @@ export class FoundryDataAccess {
    * Delete one or more actors by ID.
    */
   async deleteActors(ids: string[]): Promise<{ deleted: string[]; total: number }> {
+    this.validateFoundryState();
+
+    // Audit round 15 (2026-09-10): had no permission check of any kind — not
+    // even `validateFoundryState()` — so "Allow Write Operations" being off
+    // did nothing to stop a permanent actor delete. Same gap and fix as
+    // `deleteWorldItems`/`deleteCompendiumPack`/`deleteActorItems` (see
+    // `deleteWorldItems` above for the full citation).
+    const permissionCheck = permissionManager.checkWritePermission('deleteData', {
+      targetIds: ids,
+    });
+    if (!permissionCheck.allowed) {
+      throw new Error(`${ERROR_MESSAGES.ACCESS_DENIED}: ${permissionCheck.reason}`);
+    }
+
     const existing = ids.filter(id => game.actors.get(id));
     if (existing.length === 0) throw new Error('None of the provided actor IDs were found');
 
