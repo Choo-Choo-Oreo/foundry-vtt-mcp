@@ -154,6 +154,32 @@ export class OwnershipTools {
     const actors = await this.resolveActors(actorIdentifier);
     const players = await this.resolvePlayers(playerIdentifier);
 
+    // Fail loudly when nothing matched, instead of silently falling through to a
+    // "0 assignments completed" result that looks identical to every match having
+    // failed. Note "playerIdentifier" never matches a GM: findPlayers excludes GM
+    // users unconditionally (see data-access.ts findPlayers, `if (user.isGM) continue`)
+    // because a GM already has full access to every actor and cannot be assigned
+    // ownership through this permission map — that is expected, but it must be said
+    // out loud rather than discovered by reading source.
+    if (actors.length === 0 || players.length === 0) {
+      const reasons: string[] = [];
+      if (actors.length === 0) {
+        reasons.push(`no actor matched "${actorIdentifier}"`);
+      }
+      if (players.length === 0) {
+        reasons.push(
+          `no player matched "${playerIdentifier}" (GM/admin accounts are never matched — ` +
+            `they already have full access to every actor and cannot be assigned ownership)`
+        );
+      }
+      return {
+        success: false,
+        error: `Nothing to do: ${reasons.join(' and ')}.`,
+        actorsFound: actors.length,
+        playersFound: players.length,
+      };
+    }
+
     // Check for bulk operations
     const isBulkOperation = actors.length > 1 || players.length > 1;
     if (isBulkOperation && !confirmBulkOperation) {
