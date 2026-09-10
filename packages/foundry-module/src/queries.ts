@@ -2504,6 +2504,15 @@ export class QueryHandlers {
   }
 
   private async handleGetModuleDiagnostics(data?: { limit?: number }): Promise<any> {
+    // The bridge only ever starts its socket for a GM session (main.ts isGMUser
+    // check), so this can't currently be reached by a non-GM - gated anyway for
+    // consistency with every other handler here and in case that assumption
+    // ever changes.
+    const gmCheck = this.validateGMAccess();
+    if (!gmCheck.allowed) {
+      return { error: 'Access denied', success: false };
+    }
+
     this.dataAccess.validateFoundryState();
     return this.dataAccess.getModuleDiagnostics(data);
   }

@@ -70,8 +70,10 @@ export class CombatTools {
           '- "remove-combatants": drop `combatantIds` from the encounter (does not delete the ' +
           'tokens/actors — only their combat-tracker entry).\n' +
           '- "toggle-defeated": flip the defeated marker on `combatantIds`.\n' +
-          '- "toggle-hidden": flip the hidden state on `combatantIds` (e.g. hide an ambusher ' +
-          "from the tracker until it's revealed).\n" +
+          '- "toggle-hidden": flip the hidden state on `combatantIds` in the combat tracker ' +
+          "only (e.g. hide an ambusher's tracker entry until it acts). Does NOT touch the " +
+          "token's own canvas visibility - hide the token separately if it also needs to be " +
+          'unseen on the map.\n' +
           'There is no push channel from Foundry — call "get" again after a player acts to see ' +
           'what changed; it is not delivered automatically.',
         inputSchema: {

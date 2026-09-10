@@ -11932,11 +11932,15 @@ export class FoundryDataAccess {
     });
 
     const filtered = params.rollsOnly ? mapped.filter(m => m.isRoll) : mapped;
-    // sinceId still respects limit, capped to the most recent `limit` entries
-    // since sinceId (not the oldest), so a long-absent caller gets a bounded
-    // response instead of a multi-hundred-entry dump.
     const limit = params.limit ?? 20;
-    const limited = filtered.slice(Math.max(0, filtered.length - limit));
+    // sinceId means "catch up on what I missed" - take the OLDEST `limit`
+    // entries after sinceId (not the newest), so nothing in between is
+    // silently skipped and a caller can page forward by passing the last
+    // returned entry's id back in as the next sinceId. Without sinceId this
+    // is "what just happened" instead, so the newest `limit` is right there.
+    const limited = params.sinceId
+      ? filtered.slice(0, limit)
+      : filtered.slice(Math.max(0, filtered.length - limit));
 
     return { entries: limited, total: filtered.length };
   }

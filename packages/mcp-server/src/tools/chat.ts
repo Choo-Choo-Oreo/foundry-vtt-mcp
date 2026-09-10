@@ -122,14 +122,19 @@ export class ChatTools {
           properties: {
             limit: {
               type: 'number',
-              description: 'Most recent N entries. Default 20, max 200.',
+              description:
+                'Max entries to return. Default 20, max 200. Without sinceId this is the most ' +
+                'recent N entries; with sinceId it is the oldest N after sinceId, so repeated ' +
+                'calls page forward through a backlog instead of skipping the middle of it.',
             },
             sinceId: {
               type: 'string',
               description:
                 'Only entries posted after this message id (from a previous call), instead of ' +
                 'a flat count — the way to catch up on everything missed since last checking, ' +
-                'without re-reading old messages.',
+                "without re-reading old messages. If the response's `total` is larger than the " +
+                'number of entries returned, more are waiting — call again with sinceId set to ' +
+                "the last entry's id to get the next page.",
             },
             rollsOnly: {
               type: 'boolean',
