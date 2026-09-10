@@ -9345,9 +9345,23 @@ export class FoundryDataAccess {
         }
       }
 
-      // Set targets using Foundry's targeting system
-      if (tokenIds.length > 0 && game.user) {
-        await (game.user as any).updateTokenTargets(tokenIds);
+      // Set targets using Foundry's targeting system. `User#updateTokenTargets` does not
+      // exist on the real client - the actually-installed v14.361.0 source
+      // (client/documents/user.mjs) only has the private `_onUpdateTokenTargets`, which
+      // TokenLayer#setTargets (client/canvas/layers/tokens.mjs ~335-351) calls internally
+      // after resolving ids against its own placeables. The public entry point is
+      // `canvas.tokens.setTargets(ids, {mode})`, the same call `Token#setTarget` itself
+      // delegates to (canvas/placeables/token.mjs ~3780-3784). It is synchronous - no Promise
+      // is returned - and resolves each id via the *currently-viewed* canvas scene's
+      // placeables, not the "active" scene `sceneTokens` above was read from; those normally
+      // match for a single-scene table, but a caller viewing a different scene than the
+      // active one would see ids silently dropped by `setTargets`' own `this.get(id)` lookup.
+      if (tokenIds.length > 0) {
+        const tokenLayer = (canvas as any)?.tokens;
+        if (!tokenLayer) {
+          throw new Error('Canvas token layer is not available to set targets');
+        }
+        tokenLayer.setTargets(tokenIds, { mode: 'replace' });
         console.log(`[foundry-mcp-bridge] Set targets: ${resolvedTargetNames.join(', ')}`);
       }
     }
