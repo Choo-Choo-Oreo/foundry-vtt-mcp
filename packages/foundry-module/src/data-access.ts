@@ -8949,6 +8949,34 @@ export class FoundryDataAccess {
       const isDsa5 =
         (game.system as any)?.id === 'dsa5' && typeof actor.addCondition === 'function';
 
+      // Audit round 12 (2026-09-10) found round 11's dsa5 fix above was itself
+      // incomplete for the REMOVE side. Actor#removeCondition (and the
+      // condition-manager static it forwards to, dsa5.js's `U.removeCondition`
+      // -> `removeEffect`) is a DECREMENT, not a clear: called with no
+      // explicit level it defaults to level=1
+      // (`async removeCondition(e,t=1,s=!0,a=!1)` in the installed bundle),
+      // and `removeEffect` computes `auto: Math.max(0, current.auto - s)`,
+      // only fully deleting the ActiveEffect once both `auto` and `manual`
+      // reach zero. For any leveled/stacking dsa5 condition sitting above
+      // level 1 (fear, pain, "raptured", etc - config carries
+      // `system.condition.max`), one `removeCondition(id)` call only knocks
+      // it down by one level, while this tool's own contract (`active:false`
+      // = "remove it") and its own returned response below (`isActive:
+      // false`, "Removed X from Y") both unconditionally claim it is now
+      // fully off. pf2e's own toggleCondition avoids exactly this trap on
+      // its own decreaseCondition by passing `{forceRemove: true}` when
+      // toggling off (pf2e.mjs ~32165), which skips the decrement and
+      // deletes the condition Item outright regardless of its current
+      // value. dsa5 exposes no equivalent "force" flag on removeCondition,
+      // so the fix mirrors pf2e's forceRemove intent directly: look the
+      // effect up via `hasCondition()` (dsa5.js: `U.hasCondition`, returns
+      // the ActiveEffect document or a falsy value - no level math) and
+      // delete it outright, instead of asking removeCondition to decrement
+      // it to zero one call at a time. The ADD side is unaffected by this -
+      // round 11's `addCondition(id)` (defaulting to level 1) is correct
+      // there because there is no existing-state ambiguity when applying a
+      // condition that was previously fully absent.
+
       if (data.active) {
         if (isPf2e) {
           await actor.toggleStatusEffect(condition.id, { active: true });
@@ -8972,7 +9000,10 @@ export class FoundryDataAccess {
         if (isPf2e) {
           await actor.toggleStatusEffect(condition.id, { active: false });
         } else if (isDsa5) {
-          await actor.removeCondition(condition.id);
+          const existing = actor.hasCondition(condition.id);
+          if (existing) {
+            await actor.deleteEmbeddedDocuments('ActiveEffect', [existing.id]);
+          }
         } else {
           // Remove the condition
           const effects = actor.effects?.contents || [];

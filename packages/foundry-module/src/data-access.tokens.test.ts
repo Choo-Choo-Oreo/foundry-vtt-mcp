@@ -33,6 +33,18 @@
  * `system.condition = {max, auto, manual, value}` block that the old
  * hand-built effect never set. Fixed the same way as pf2e: route dsa5 through
  * its own actor methods instead of reimplementing them.
+ *
+ * Round 12 (2026-09-10) found round 11's dsa5 REMOVE fix was itself
+ * incomplete: `actor.removeCondition(id)` defaults to decrementing a leveled
+ * condition by one level (dsa5.js `removeEffect`: `auto: Math.max(0,
+ * current.auto - 1)`), only deleting the ActiveEffect once both its `auto`
+ * and `manual` stacks reach zero - so removing a condition currently above
+ * level 1 left it partially active while the tool still reported
+ * `isActive: false`. Fixed by looking the effect up via `hasCondition()` and
+ * deleting it outright (mirroring pf2e's own `{forceRemove: true}` on
+ * toggle-off, pf2e.mjs ~32165), instead of asking removeCondition to
+ * decrement it to zero one call at a time. The ADD side (`addCondition`) is
+ * unchanged - it was already correct.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -147,16 +159,22 @@ describe('FoundryDataAccess.toggleTokenCondition', () => {
     let actor: any;
     let token: any;
 
+    let hasCondition: ReturnType<typeof vi.fn>;
+    let deleteEmbeddedDocuments: ReturnType<typeof vi.fn>;
+
     beforeEach(() => {
       // dsa5's CONFIG.statusEffects is a plain array, like core Foundry/D&D5e.
       stubGame('dsa5', [{ id: 'stunned', name: 'CONDITION.stunned', icon: 'stunned.webp' }]);
       addCondition = vi.fn(async () => [{}]);
       removeCondition = vi.fn(async () => [{}]);
+      hasCondition = vi.fn(() => false);
+      deleteEmbeddedDocuments = vi.fn();
       actor = {
         addCondition,
         removeCondition,
+        hasCondition,
         createEmbeddedDocuments: vi.fn(),
-        deleteEmbeddedDocuments: vi.fn(),
+        deleteEmbeddedDocuments,
         effects: { contents: [] },
       };
       token = { id: 'tok1', name: 'Held', actor };
@@ -184,15 +202,41 @@ describe('FoundryDataAccess.toggleTokenCondition', () => {
       expect(result.isActive).toBe(true);
     });
 
-    it('removes a condition via actor.removeCondition, not by scanning ActiveEffects', async () => {
+    it('removes a boolean condition by deleting the ActiveEffect hasCondition finds, not via removeCondition', async () => {
+      // hasCondition() found nothing (default stub) - no effect to delete,
+      // and removeCondition (a decrement, not a clear) must not be called.
       const result = await dataAccess.toggleTokenCondition({
         tokenId: 'tok1',
         conditionId: 'stunned',
         active: false,
       });
 
-      expect(removeCondition).toHaveBeenCalledWith('stunned');
-      expect(actor.deleteEmbeddedDocuments).not.toHaveBeenCalled();
+      expect(hasCondition).toHaveBeenCalledWith('stunned');
+      expect(removeCondition).not.toHaveBeenCalled();
+      expect(deleteEmbeddedDocuments).not.toHaveBeenCalled();
+      expect(result.success).toBe(true);
+      expect(result.isActive).toBe(false);
+    });
+
+    it('fully removes a LEVELED condition in one call, instead of decrementing it by one level (round 12 regression)', async () => {
+      // dsa5's own Actor#removeCondition(id) defaults to level=1 and only
+      // decrements a leveled condition's stack (dsa5.js removeEffect:
+      // `auto: Math.max(0, current.auto - 1)`), leaving e.g. Fear at level 2
+      // still active after one call while the tool claims `isActive: false`.
+      // hasCondition() returns the actual ActiveEffect document (with an id)
+      // when a leveled condition - currently at any stack above zero - is
+      // present; the fix must delete it outright rather than decrementing.
+      hasCondition.mockReturnValue({ id: 'eff-fear-lvl2', system: { condition: { value: 2 } } });
+
+      const result = await dataAccess.toggleTokenCondition({
+        tokenId: 'tok1',
+        conditionId: 'stunned',
+        active: false,
+      });
+
+      expect(hasCondition).toHaveBeenCalledWith('stunned');
+      expect(removeCondition).not.toHaveBeenCalled();
+      expect(deleteEmbeddedDocuments).toHaveBeenCalledWith('ActiveEffect', ['eff-fear-lvl2']);
       expect(result.success).toBe(true);
       expect(result.isActive).toBe(false);
     });
