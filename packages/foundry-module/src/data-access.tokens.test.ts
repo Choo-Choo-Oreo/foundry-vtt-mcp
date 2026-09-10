@@ -45,6 +45,17 @@
  * toggle-off, pf2e.mjs ~32165), instead of asking removeCondition to
  * decrement it to zero one call at a time. The ADD side (`addCondition`) is
  * unchanged - it was already correct.
+ *
+ * Round 13 (2026-09-10) found the mcp-server tool's own documented contract
+ * was unreachable: the 'toggle-token-condition' description promises "If not
+ * specified, will toggle the current state" for `active`, but
+ * queries.ts's handleToggleTokenCondition() unconditionally threw
+ * `active must be a boolean` for a missing `active`, before this method ever
+ * ran - no code anywhere computed a current-state flip. Fixed by relaxing
+ * that guard to allow an omitted `active` and resolving it here: pf2e/dsa5
+ * both expose a public `actor.hasCondition(id)` (used to detect current
+ * state), everything else reuses the same effects-array scan the generic
+ * remove branch already does.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -72,6 +83,7 @@ describe('FoundryDataAccess.toggleTokenCondition', () => {
   describe('pf2e', () => {
     let toggleCondition: ReturnType<typeof vi.fn>;
     let toggleStatusEffect: ReturnType<typeof vi.fn>;
+    let hasCondition: ReturnType<typeof vi.fn>;
     let actor: any;
     let token: any;
 
@@ -90,9 +102,15 @@ describe('FoundryDataAccess.toggleTokenCondition', () => {
       // only toggleStatusEffect, which is what ActorPF2e's own dispatch uses.
       toggleCondition = vi.fn(async () => true);
       toggleStatusEffect = vi.fn(async () => true);
+      // Real ActorPF2e#hasCondition (pf2e.mjs ~1160115:
+      // `hasCondition(...e){return e.some(e=>this.conditions.hasType(e))}`) -
+      // used by round 13's toggle-if-`active`-omitted resolution, not by any
+      // apply/remove branch itself. Defaults to "not currently active".
+      hasCondition = vi.fn(() => false);
       actor = {
         toggleCondition,
         toggleStatusEffect,
+        hasCondition,
         createEmbeddedDocuments: vi.fn(),
         deleteEmbeddedDocuments: vi.fn(),
         effects: { contents: [] },
@@ -150,6 +168,34 @@ describe('FoundryDataAccess.toggleTokenCondition', () => {
       expect(toggleStatusEffect).toHaveBeenCalledWith('dead', { active: true });
       expect(toggleCondition).not.toHaveBeenCalled();
       expect(result.success).toBe(true);
+    });
+
+    it('with `active` omitted, applies the condition when actor.hasCondition() says it is not currently active (round 13)', async () => {
+      hasCondition.mockReturnValue(false);
+
+      const result = await dataAccess.toggleTokenCondition({
+        tokenId: 'tok1',
+        conditionId: 'prone',
+      });
+
+      expect(hasCondition).toHaveBeenCalledWith('prone');
+      expect(toggleStatusEffect).toHaveBeenCalledWith('prone', { active: true });
+      expect(result.isActive).toBe(true);
+      expect(result.active).toBe(true);
+    });
+
+    it('with `active` omitted, removes the condition when actor.hasCondition() says it is currently active (round 13)', async () => {
+      hasCondition.mockReturnValue(true);
+
+      const result = await dataAccess.toggleTokenCondition({
+        tokenId: 'tok1',
+        conditionId: 'prone',
+      });
+
+      expect(hasCondition).toHaveBeenCalledWith('prone');
+      expect(toggleStatusEffect).toHaveBeenCalledWith('prone', { active: false });
+      expect(result.isActive).toBe(false);
+      expect(result.active).toBe(false);
     });
   });
 
@@ -240,6 +286,31 @@ describe('FoundryDataAccess.toggleTokenCondition', () => {
       expect(result.success).toBe(true);
       expect(result.isActive).toBe(false);
     });
+
+    it('with `active` omitted, applies via addCondition when actor.hasCondition() says it is not currently active (round 13)', async () => {
+      hasCondition.mockReturnValue(false);
+
+      const result = await dataAccess.toggleTokenCondition({
+        tokenId: 'tok1',
+        conditionId: 'stunned',
+      });
+
+      expect(hasCondition).toHaveBeenCalledWith('stunned');
+      expect(addCondition).toHaveBeenCalledWith('stunned');
+      expect(result.isActive).toBe(true);
+    });
+
+    it('with `active` omitted, removes via the hasCondition()+delete path when currently active (round 13)', async () => {
+      hasCondition.mockReturnValue({ id: 'eff-stunned' });
+
+      const result = await dataAccess.toggleTokenCondition({
+        tokenId: 'tok1',
+        conditionId: 'stunned',
+      });
+
+      expect(deleteEmbeddedDocuments).toHaveBeenCalledWith('ActiveEffect', ['eff-stunned']);
+      expect(result.isActive).toBe(false);
+    });
   });
 
   describe('dnd5e (unaffected by the pf2e fix)', () => {
@@ -285,6 +356,34 @@ describe('FoundryDataAccess.toggleTokenCondition', () => {
 
       expect(actor.deleteEmbeddedDocuments).toHaveBeenCalledWith('ActiveEffect', ['eff1']);
       expect(result.success).toBe(true);
+    });
+
+    it('with `active` omitted, removes the condition by scanning actor.effects when it is already present (round 13)', async () => {
+      // The beforeEach effects.contents already carries a matching 'prone'
+      // ActiveEffect - the generic branch has no hasCondition() to call, so
+      // round 13's toggle-resolution must fall back to the same
+      // effects-array scan the existing remove branch already uses.
+      const result = await dataAccess.toggleTokenCondition({
+        tokenId: 'tok1',
+        conditionId: 'prone',
+      });
+
+      expect(actor.deleteEmbeddedDocuments).toHaveBeenCalledWith('ActiveEffect', ['eff1']);
+      expect(result.isActive).toBe(false);
+    });
+
+    it('with `active` omitted, applies the condition via ActiveEffect when not present in actor.effects (round 13)', async () => {
+      actor.effects.contents = [];
+
+      const result = await dataAccess.toggleTokenCondition({
+        tokenId: 'tok1',
+        conditionId: 'prone',
+      });
+
+      expect(actor.createEmbeddedDocuments).toHaveBeenCalledWith('ActiveEffect', [
+        expect.objectContaining({ statuses: ['prone'] }),
+      ]);
+      expect(result.isActive).toBe(true);
     });
   });
 });

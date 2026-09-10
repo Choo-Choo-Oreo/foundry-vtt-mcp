@@ -8840,7 +8840,7 @@ export class FoundryDataAccess {
   async toggleTokenCondition(data: {
     tokenId: string;
     conditionId: string;
-    active: boolean;
+    active?: boolean;
   }): Promise<any> {
     this.validateFoundryState();
 
@@ -8977,7 +8977,55 @@ export class FoundryDataAccess {
       // there because there is no existing-state ambiguity when applying a
       // condition that was previously fully absent.
 
-      if (data.active) {
+      // Audit round 13 (2026-09-10) found this tool's OWN documented contract
+      // was unreachable. The mcp-server tool description
+      // (packages/mcp-server/src/tools/token-manipulation.ts, 'toggle-token-
+      // condition') advertises `active` as "Optional: ... If not specified,
+      // will toggle the current state" - but no code anywhere implemented
+      // that. queries.ts's handleToggleTokenCondition() (the only caller of
+      // this method) unconditionally threw `active must be a boolean` for a
+      // missing `active`, before this method ever ran, so the advertised
+      // toggle-if-omitted behavior could never be exercised - a caller
+      // relying on the documented optional param got a thrown error instead
+      // of a toggle. Confirmed this wasn't a stale doc for a removed feature:
+      // grepping mcp-server/foundry-module found no other code computing a
+      // current-state flip anywhere. Notably, pf2e's OWN toggleCondition
+      // (pf2e.mjs ~32160-32164: `let n = this.hasCondition(e), r = t?.active
+      // ?? !n`) already natively supports an omitted `active` by flipping the
+      // condition's current state - our validation layer was blocking
+      // callers from ever reaching that native support. Implemented properly
+      // instead of just correcting the description: relaxed queries.ts's
+      // guard to allow `active` to be omitted, and resolve the toggle here
+      // using each system's own real "is this condition currently on" check
+      // (pf2e/dsa5 both expose a public `actor.hasCondition(id)` - pf2e.mjs
+      // ~1160115: `hasCondition(...e){return e.some(e=>this.conditions.
+      // hasType(e))}`; dsa5.js: `hasCondition(e){return U.hasCondition(this,
+      // e)}`, already used by the dsa5 remove branch below), falling back to
+      // the same effects-array scan the generic remove branch already uses
+      // for every other system.
+      let resolvedActive: boolean;
+      if (typeof data.active === 'boolean') {
+        resolvedActive = data.active;
+      } else if ((isPf2e || isDsa5) && typeof actor.hasCondition === 'function') {
+        resolvedActive = !actor.hasCondition(condition.id);
+      } else {
+        const currentEffects = actor.effects?.contents || [];
+        const isCurrentlyActive = currentEffects.some((effect: any) => {
+          if (effect.statuses?.has(data.conditionId)) {
+            return true;
+          }
+          if (effect.name?.toLowerCase() === data.conditionId.toLowerCase()) {
+            return true;
+          }
+          if (effect.label?.toLowerCase() === data.conditionId.toLowerCase()) {
+            return true;
+          }
+          return false;
+        });
+        resolvedActive = !isCurrentlyActive;
+      }
+
+      if (resolvedActive) {
         if (isPf2e) {
           await actor.toggleStatusEffect(condition.id, { active: true });
         } else if (isDsa5) {
@@ -9040,9 +9088,9 @@ export class FoundryDataAccess {
         tokenName: token.name,
         conditionId: data.conditionId,
         conditionName: condition.name || condition.label || condition.id,
-        isActive: data.active,
-        active: data.active,
-        message: data.active
+        isActive: resolvedActive,
+        active: resolvedActive,
+        message: resolvedActive
           ? `Applied ${data.conditionId} to ${token.name}`
           : `Removed ${data.conditionId} from ${token.name}`,
       };

@@ -1489,7 +1489,7 @@ export class QueryHandlers {
   private async handleToggleTokenCondition(data: {
     tokenId: string;
     conditionId: string;
-    active: boolean;
+    active?: boolean;
   }): Promise<any> {
     try {
       // SECURITY: Silent GM validation
@@ -1506,7 +1506,14 @@ export class QueryHandlers {
       if (!data.conditionId) {
         throw new Error('conditionId is required');
       }
-      if (typeof data.active !== 'boolean') {
+      // Audit round 13 (2026-09-10): `active` is documented as optional on
+      // the mcp-server tool ('toggle-token-condition' - "If not specified,
+      // will toggle the current state") but this guard used to require it
+      // unconditionally, throwing before toggleTokenCondition() ever ran and
+      // making the documented toggle-if-omitted behavior unreachable. Only
+      // reject a genuinely wrong type (e.g. a string), not an omitted value -
+      // toggleTokenCondition() now resolves an omitted `active` itself.
+      if (data.active !== undefined && typeof data.active !== 'boolean') {
         throw new Error('active must be a boolean');
       }
 
