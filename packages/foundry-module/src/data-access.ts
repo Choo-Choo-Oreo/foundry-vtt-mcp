@@ -11939,12 +11939,17 @@ export class FoundryDataAccess {
     // the last returned entry's id back in as the next sinceId. Without
     // sinceId this is "what just happened" instead, so the newest `limit`
     // is right there.
-    // Caveat this does NOT cover: game.messages only holds whatever Foundry
-    // has lazily loaded into the client (CONFIG.ChatMessage.batchSize), not
-    // full server history - if the GM's tab reloads between calls, an old
-    // sinceId can come back as "not found" (empty page) even though messages
-    // genuinely happened, because they rolled out of the loaded window, not
-    // because nothing happened. See list-chat-log's tool description.
+    // Caveat this does NOT cover, mechanism unconfirmed: whether game.messages
+    // (a WorldCollection - Foundry's own docs describe it as the full set of
+    // ChatMessage documents in the world, with no partial-load language) can
+    // ever actually be incomplete client-side after a GM tab reload. An
+    // earlier version of this comment named CONFIG.ChatMessage.batchSize/
+    // ChatLog.renderBatch as the cause, but those are documented as sidebar
+    // *rendering* pagination, not WorldCollection sync - likely the wrong
+    // mechanism. Left as a suspected, unconfirmed risk rather than asserted
+    // as fact either way - see list-chat-log-sinceid-reload-completeness in
+    // the notes file. If it turns out game.messages is always complete, this
+    // whole caveat can be deleted.
     const limited = params.sinceId
       ? filtered.slice(0, limit)
       : filtered.slice(Math.max(0, filtered.length - limit));
@@ -11981,9 +11986,55 @@ export class FoundryDataAccess {
       return (game as any).combat ?? null;
     };
 
+    // pf2e/dnd5e keep HP at system.attributes.hp; WFRP4e at system.status.wounds
+    // (data-access.ts wfrp4e actor-write path, ~line 7409); Cosmere RPG at
+    // system.resources.hea as DerivedValueField(s) (see readDerived's own doc
+    // comment). Checked in that order so a system matching the first shape
+    // never falls through to a later one.
+    const readCombatantHp = (actor: any): { value: number | null; max: number | null } | null => {
+      const system = actor?.system;
+      if (!system) return null;
+
+      const attrHp = system.attributes?.hp;
+      if (attrHp && (attrHp.value !== undefined || attrHp.max !== undefined)) {
+        return { value: attrHp.value ?? null, max: attrHp.max ?? null };
+      }
+
+      const wounds = system.status?.wounds;
+      if (wounds && (wounds.value !== undefined || wounds.max !== undefined)) {
+        return { value: wounds.value ?? null, max: wounds.max ?? null };
+      }
+
+      // Cosmere DerivedValueField ({value, derived, override?, useOverride}) -
+      // duplicated from PersistentCreatureIndex.readDerived rather than shared
+      // across classes for a two-line resolver.
+      const resolveDerived = (field: any): number | undefined => {
+        if (field == null) return undefined;
+        if (typeof field === 'number') return field;
+        if (typeof field === 'object') {
+          if (field.useOverride === true && typeof field.override === 'number') {
+            return field.override;
+          }
+          if (typeof field.value === 'number') return field.value;
+          if (typeof field.derived === 'number') return field.derived;
+        }
+        return undefined;
+      };
+
+      const hea = system.resources?.hea;
+      if (hea != null) {
+        const value = typeof hea.value === 'number' ? hea.value : resolveDerived(hea.value);
+        const max = resolveDerived(hea.max);
+        if (value !== undefined || max !== undefined) {
+          return { value: value ?? null, max: max ?? null };
+        }
+      }
+
+      return null;
+    };
+
     const combatantSnapshot = (c: any) => {
       const actor = c.actor ?? null;
-      const hp = actor?.system?.attributes?.hp ?? null;
       return {
         id: c.id,
         name: c.name ?? actor?.name ?? 'Unknown',
@@ -11993,7 +12044,7 @@ export class FoundryDataAccess {
         hidden: !!c.hidden,
         defeated: !!(c.isDefeated ?? c.defeated),
         isNPC: actor ? !actor.hasPlayerOwner : null,
-        hp: hp ? { value: hp.value ?? null, max: hp.max ?? null } : null,
+        hp: readCombatantHp(actor),
       };
     };
 

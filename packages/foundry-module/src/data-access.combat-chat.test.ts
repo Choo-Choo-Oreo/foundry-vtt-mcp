@@ -174,4 +174,52 @@ describe('FoundryDataAccess.manageCombat', () => {
     ]);
     expect(c1.update).not.toHaveBeenCalled();
   });
+
+  it('get reads HP from WFRP4e-shaped actors (system.status.wounds)', async () => {
+    const c1 = makeCombatant('c1', false, false);
+    c1.actor = { name: 'Bandit', system: { status: { wounds: { value: 3, max: 12 } } } };
+    const combat: any = {
+      id: 'combat1',
+      turns: [c1],
+      combatants: { get: (id: string) => (id === 'c1' ? c1 : undefined) },
+    };
+    (globalThis as any).game.combat = combat;
+
+    const result = await dataAccess.manageCombat({ action: 'get' });
+
+    expect(result.combatants[0].hp).toEqual({ value: 3, max: 12 });
+  });
+
+  it('get reads HP from Cosmere RPG-shaped actors (system.resources.hea, DerivedValueField max)', async () => {
+    const c1 = makeCombatant('c1', false, false);
+    c1.actor = {
+      name: 'Windrunner',
+      system: { resources: { hea: { value: 14, max: { value: 20, derived: 20 } } } },
+    };
+    const combat: any = {
+      id: 'combat1',
+      turns: [c1],
+      combatants: { get: (id: string) => (id === 'c1' ? c1 : undefined) },
+    };
+    (globalThis as any).game.combat = combat;
+
+    const result = await dataAccess.manageCombat({ action: 'get' });
+
+    expect(result.combatants[0].hp).toEqual({ value: 14, max: 20 });
+  });
+
+  it("get returns hp: null rather than guessing when an actor's HP shape is unrecognized", async () => {
+    const c1 = makeCombatant('c1', false, false);
+    c1.actor = { name: 'Mystery', system: { somethingElse: { totally: 'unrelated' } } };
+    const combat: any = {
+      id: 'combat1',
+      turns: [c1],
+      combatants: { get: (id: string) => (id === 'c1' ? c1 : undefined) },
+    };
+    (globalThis as any).game.combat = combat;
+
+    const result = await dataAccess.manageCombat({ action: 'get' });
+
+    expect(result.combatants[0].hp).toBeNull();
+  });
 });
