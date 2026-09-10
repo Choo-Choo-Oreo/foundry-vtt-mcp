@@ -66,7 +66,10 @@ export class CombatTools {
           "the system's default.\n" +
           '- "set-initiative": manually set `initiative` on `combatantIds[0]` (e.g. a player ' +
           'reported their own roll from a physical table).\n' +
-          '- "add-combatants": join tokens from the current scene (`tokenIds`) to the encounter.\n' +
+          '- "add-combatants": join `tokenIds` to the encounter, from the target combat\'s own ' +
+          'scene (or the currently-viewed scene if the combat has none). Carries over each ' +
+          "token's hidden state and skips a token already in this combat rather than " +
+          'duplicating it; either case is reported back (`notFound`/`alreadyInCombat`).\n' +
           '- "remove-combatants": drop `combatantIds` from the encounter (does not delete the ' +
           'tokens/actors — only their combat-tracker entry).\n' +
           '- "toggle-defeated": flip the defeated marker on `combatantIds`.\n' +

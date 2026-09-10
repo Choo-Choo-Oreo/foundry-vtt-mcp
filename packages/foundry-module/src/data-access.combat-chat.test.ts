@@ -19,6 +19,7 @@ function stubGame(overrides: Record<string, any> = {}) {
   // PersistentCreatureIndex registers Hooks.on(...) at construction time
   // (data-access.ts:491), so Hooks must exist before `new FoundryDataAccess()`.
   (globalThis as any).Hooks = { on: vi.fn(), off: vi.fn(), once: vi.fn(), call: vi.fn() };
+  (globalThis as any).CONFIG = { specialStatusEffects: { DEFEATED: 'dead' } };
   (globalThis as any).game = {
     ready: true,
     world: { id: 'test-world' },
@@ -31,6 +32,10 @@ function makeCombatant(id: string, hidden: boolean, defeated: boolean) {
   const c: any = { id, hidden, defeated, isDefeated: defeated };
   c.update = vi.fn(async (changes: any) => {
     Object.assign(c, changes);
+    // Mirror Foundry's real Combatant#isDefeated getter tracking the raw field, so a
+    // second toggle-defeated call in the same test sees the updated state instead of
+    // the stale value this plain mock would otherwise keep forever.
+    if ('defeated' in changes) c.isDefeated = changes.defeated;
     return c;
   });
   return c;
@@ -122,6 +127,47 @@ describe('FoundryDataAccess.manageCombat', () => {
 
     expect(deadOne.update).toHaveBeenCalledWith({ defeated: false });
     expect(aliveOne.update).toHaveBeenCalledWith({ defeated: true });
+  });
+
+  it('toggle-defeated also syncs the token dead-overlay via actor.toggleStatusEffect', async () => {
+    // Foundry's own tracker skull-icon handler does both the raw field update AND
+    // actor.toggleStatusEffect(CONFIG.specialStatusEffects.DEFEATED, {overlay:true,...}) -
+    // audit round 7 found the bridge only did the first, so the field flipped but the
+    // token's canvas overlay never changed.
+    const c1 = makeCombatant('c1', false, false);
+    const toggleStatusEffect = vi.fn().mockResolvedValue(true);
+    c1.actor = { toggleStatusEffect };
+    const combat: any = {
+      id: 'combat1',
+      turns: [],
+      combatants: { get: (id: string) => (id === 'c1' ? c1 : undefined) },
+    };
+    (globalThis as any).game.combat = combat;
+
+    await dataAccess.manageCombat({ action: 'toggle-defeated', combatantIds: ['c1'] });
+
+    expect(c1.update).toHaveBeenCalledWith({ defeated: true });
+    expect(toggleStatusEffect).toHaveBeenCalledWith('dead', { overlay: true, active: true });
+
+    await dataAccess.manageCombat({ action: 'toggle-defeated', combatantIds: ['c1'] });
+
+    expect(c1.update).toHaveBeenCalledWith({ defeated: false });
+    expect(toggleStatusEffect).toHaveBeenCalledWith('dead', { overlay: true, active: false });
+  });
+
+  it('toggle-defeated does not throw when the combatant has no actor to sync an overlay onto', async () => {
+    const c1 = makeCombatant('c1', false, false);
+    const combat: any = {
+      id: 'combat1',
+      turns: [],
+      combatants: { get: (id: string) => (id === 'c1' ? c1 : undefined) },
+    };
+    (globalThis as any).game.combat = combat;
+
+    await expect(
+      dataAccess.manageCombat({ action: 'toggle-defeated', combatantIds: ['c1'] })
+    ).resolves.toBeDefined();
+    expect(c1.update).toHaveBeenCalledWith({ defeated: true });
   });
 
   it('end calls delete() and never the confirmation-dialog endCombat()', async () => {
@@ -394,7 +440,61 @@ describe('FoundryDataAccess.manageCombat', () => {
     });
 
     expect(createEmbeddedDocuments).toHaveBeenCalledWith('Combatant', [
-      { tokenId: 'tok1', sceneId: 'scene-target' },
+      { tokenId: 'tok1', sceneId: 'scene-target', hidden: false },
     ]);
+  });
+
+  it("add-combatants carries over a hidden token's hidden state instead of defaulting to visible", async () => {
+    // Mirrors Foundry's own TokenDocument#createCombatants, which sets hidden: token.hidden -
+    // audit round 7 found the bridge dropped this, so a hidden ambusher token would show up
+    // on the tracker visible by default.
+    const ambusher = { id: 'tok1', hidden: true };
+    const scene = {
+      id: 'scene1',
+      tokens: { get: (id: string) => (id === 'tok1' ? ambusher : undefined) },
+    };
+    const createEmbeddedDocuments = vi.fn().mockResolvedValue(undefined);
+    const combat: any = {
+      id: 'combat1',
+      turns: [],
+      combatants: { get: () => undefined },
+      createEmbeddedDocuments,
+    };
+    stubGame({ combat, scenes: { current: scene } });
+    dataAccess = new FoundryDataAccess();
+
+    await dataAccess.manageCombat({ action: 'add-combatants', tokenIds: ['tok1'] });
+
+    expect(createEmbeddedDocuments).toHaveBeenCalledWith('Combatant', [
+      { tokenId: 'tok1', sceneId: 'scene1', hidden: true },
+    ]);
+  });
+
+  it('add-combatants skips a token already in this combat instead of creating a duplicate', async () => {
+    const alreadyIn = { id: 'tok1', hidden: false, inCombat: true };
+    const fresh = { id: 'tok2', hidden: false, inCombat: false };
+    const scene = {
+      id: 'scene1',
+      tokens: { get: (id: string) => ({ tok1: alreadyIn, tok2: fresh })[id] },
+    };
+    const createEmbeddedDocuments = vi.fn().mockResolvedValue(undefined);
+    const combat: any = {
+      id: 'combat1',
+      turns: [],
+      combatants: { get: () => undefined },
+      createEmbeddedDocuments,
+    };
+    stubGame({ combat, scenes: { current: scene } });
+    dataAccess = new FoundryDataAccess();
+
+    const result = await dataAccess.manageCombat({
+      action: 'add-combatants',
+      tokenIds: ['tok1', 'tok2'],
+    });
+
+    expect(createEmbeddedDocuments).toHaveBeenCalledWith('Combatant', [
+      { tokenId: 'tok2', sceneId: 'scene1', hidden: false },
+    ]);
+    expect(result.alreadyInCombat).toEqual(['tok1']);
   });
 });

@@ -12198,6 +12198,7 @@ export class FoundryDataAccess {
         const scene = combat.scene ?? (game.scenes as any).current;
         if (!scene) throw new Error('No active scene found');
         const notFound: string[] = [];
+        const alreadyInCombat: string[] = [];
         const creates: any[] = [];
         for (const tokenId of params.tokenIds) {
           const token = scene.tokens.get(tokenId);
@@ -12205,16 +12206,25 @@ export class FoundryDataAccess {
             notFound.push(tokenId);
             continue;
           }
-          creates.push({ tokenId: token.id, sceneId: scene.id });
+          // Mirrors Foundry's own TokenDocument#createCombatants (client/documents/
+          // token.mjs): carry the token's hidden state over so a hidden ambusher
+          // doesn't show up on the tracker visible by default, and skip a token
+          // already in this combat instead of creating a duplicate Combatant
+          // (audit round 7, confirmed against the installed v14 client).
+          if (token.inCombat) {
+            alreadyInCombat.push(tokenId);
+            continue;
+          }
+          creates.push({ tokenId: token.id, sceneId: scene.id, hidden: !!token.hidden });
         }
         if (creates.length === 0) {
           throw new Error(
-            `No matching tokens found on the current scene: ${params.tokenIds.join(', ')}`
+            `No combatants to add: ${params.tokenIds.join(', ')} (not found: ${notFound.join(', ') || 'none'}; already in combat: ${alreadyInCombat.join(', ') || 'none'})`
           );
         }
         await combat.createEmbeddedDocuments('Combatant', creates);
         this.auditLog('manageCombat.add-combatants', { count: creates.length }, 'success');
-        return { ...describe(combat), notFound };
+        return { ...describe(combat), notFound, alreadyInCombat };
       }
 
       case 'remove-combatants': {
@@ -12234,7 +12244,22 @@ export class FoundryDataAccess {
         for (const id of params.combatantIds) {
           const c = combat.combatants.get(id);
           if (!c) throw new Error(`Combatant not found: ${id}`);
-          await c.update({ defeated: !(c.isDefeated ?? c.defeated) });
+          const isDefeated = !(c.isDefeated ?? c.defeated);
+          await c.update({ defeated: isDefeated });
+          // Foundry's own tracker skull-icon handler (CombatTracker#_onToggleDefeatedStatus,
+          // client/applications/sidebar/tabs/combat-tracker.mjs) does this too, not just the
+          // raw field flip - without it the `defeated` field changes but the token's dead/
+          // skull overlay on the canvas never appears or disappears. Confirmed against the
+          // installed Foundry v14 client (audit round 7); previously logged only as
+          // "suspected" (toggle-defeated-isDefeated-getter-unverified in the notes file)
+          // since round 2.
+          const statusId =
+            typeof CONFIG !== 'undefined'
+              ? (CONFIG as any).specialStatusEffects?.DEFEATED
+              : undefined;
+          if (statusId && typeof c.actor?.toggleStatusEffect === 'function') {
+            await c.actor.toggleStatusEffect(statusId, { overlay: true, active: isDefeated });
+          }
         }
         break;
       }
