@@ -10342,10 +10342,17 @@ export class FoundryDataAccess {
           custom: { enabled: false },
         }));
 
-      // 6. Range object (system-level — holds the real range/reach)
+      // 6. Range object (system-level — holds the real range/reach).
+      // dnd5e's WeaponData.range schema is { value, long, reach, units } — `value`/`long`
+      // are the ranged normal/long distances, `reach` is the dedicated melee-reach field
+      // (module/data/item/weapon.mjs, dnd5e 5.3.3). Melee attacks must write `reachFt`
+      // into `reach`, not `value`: WeaponData#prepareDerivedData only fills `range.reach`
+      // from a hardcoded 5ft/10ft default when it is `null`, so leaving it unset silently
+      // discards any custom reach and the caller's number leaks into the "Range" field
+      // instead of "Reach" on the item sheet.
       const rangeObj =
         data.attackType === 'melee'
-          ? { value: data.reachFt ?? 5, long: null, units: 'ft' }
+          ? { value: null, long: null, reach: data.reachFt ?? 5, units: 'ft' }
           : { value: data.rangeFt, long: data.longRangeFt ?? null, units: 'ft' };
 
       // 7. Conditional 2024-only fields
@@ -10854,10 +10861,12 @@ export class FoundryDataAccess {
         custom: { enabled: false },
       }));
 
-      // 7. System-level range (real reach/range — activity range is always 'self')
+      // 7. System-level range (real reach/range — activity range is always 'self').
+      // See addAttackToActor's rangeObj comment: `reach` is its own schema field
+      // (module/data/item/weapon.mjs, dnd5e 5.3.3), distinct from `value`/`long`.
       const rangeObj =
         data.attackType === 'melee'
-          ? { value: data.reachFt ?? 5, long: null, units: 'ft' }
+          ? { value: null, long: null, reach: data.reachFt ?? 5, units: 'ft' }
           : { value: data.rangeFt, long: data.longRangeFt ?? null, units: 'ft' };
 
       // 8. Conditional 2024-only fields (same rules as Tipo A)
