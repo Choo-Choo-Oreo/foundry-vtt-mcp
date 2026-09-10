@@ -8898,14 +8898,64 @@ export class FoundryDataAccess {
       // the condition - never recognizes. The call reports success but the
       // condition is functionally absent: this is the pf2e half of the
       // long-suspected token-condition-noops gap. Route pf2e through the real API.
+      //
+      // Call actor.toggleStatusEffect(id, ...), NOT actor.toggleCondition(id, ...),
+      // directly. `condition.id` here is a pf2e status slug drawn from
+      // CONFIG.statusEffects, which pf2e populates from its own condition list PLUS
+      // one extra entry it adds by hand - `dead` (pf2e.mjs #updateStatusIcons,
+      // `CONFIG.statusEffects.dead = {id:"dead", ...}`) - that is not a real pf2e
+      // "condition" (it's derived from Combatant#isDefeated, handled by the
+      // separate manage-combat toggle-defeated action) and is NOT in the slug set
+      // `toggleCondition` validates against (`un`, pf2e.mjs ~2895, 44 entries, no
+      // "dead"). ActorPF2e#toggleCondition throws `ErrorPF2e("Unrecognized
+      // condition: dead")` for any slug outside that set (pf2e.mjs ~32160-32164).
+      // ActorPF2e's OWN toggleStatusEffect override (pf2e.mjs ~32166-32168) already
+      // does this dispatch correctly: `setHasElement(un, e) ? this.toggleCondition
+      // (e, t) : super.toggleStatusEffect(e, t)` - real conditions go to
+      // toggleCondition, "dead" (and anything else outside the set) falls through
+      // to core Foundry's Actor#toggleStatusEffect (client/documents/actor.mjs:552,
+      // the generic ActiveEffect-from-status-id path), which is exactly right for
+      // it. Calling toggleCondition directly here skips that dispatch and throws
+      // whenever a caller passes "dead" - which get-available-conditions (this same
+      // file, getAvailableConditions()) itself offers as a valid condition id for a
+      // pf2e world, since it lists every CONFIG.statusEffects entry with no filter.
+      // Calling toggleStatusEffect instead handles both cases correctly with no
+      // special-casing needed here.
       const isPf2e =
         (game.system as any)?.id === 'pf2e' && typeof actor.toggleCondition === 'function';
 
+      // DSA5 conditions are ALSO not plain on/off ActiveEffects, the same bug
+      // class as pf2e above - confirmed by reading the actually-installed dsa5
+      // system bundle (installed locally as of this pass, unlike prior rounds
+      // which only had pf2e installed): C:\Users\Orea\AppData\Local\FoundryVTT\
+      // Data\systems\dsa5\bundle\modules\dsa5.js. Actor#addCondition/
+      // removeCondition/hasCondition (delegating to a static condition-manager
+      // module, "U" in the minified bundle) are dsa5's real API, directly
+      // analogous to pf2e's toggleCondition/increaseCondition/decreaseCondition.
+      // Some dsa5 conditions are simple booleans, but many (fear levels, pain,
+      // "raptured", etc.) are LEVELED/stacking: their CONFIG.statusEffects entry
+      // carries a `system.condition.max`, and addCondition's real createEffect()
+      // computes `system.condition = {max, auto, manual, value}` from the
+      // requested level before creating the ActiveEffect. The old code below
+      // (still used for D&D5e) never set any `system.condition` data at all -
+      // hasCondition() would still find the raw effect (it only checks
+      // `effect.statuses.has(id)`), but dsa5's own removeCondition() and any UI
+      // reading a leveled condition's stack/severity dereference
+      // `effect.system.condition.value`, which would be undefined (or throw
+      // reading through a missing `.system.condition`) on an effect this old
+      // code created. Routing through the real API avoids reimplementing that
+      // leveled-effect math ourselves, exactly as the pf2e fix avoided
+      // reimplementing ConditionManager.
+      const isDsa5 =
+        (game.system as any)?.id === 'dsa5' && typeof actor.addCondition === 'function';
+
       if (data.active) {
         if (isPf2e) {
-          await actor.toggleCondition(condition.id, { active: true });
+          await actor.toggleStatusEffect(condition.id, { active: true });
+        } else if (isDsa5) {
+          await actor.addCondition(condition.id);
         } else {
-          // Add the condition - handle DSA5 and other systems
+          // Add the condition - handle other systems generically (D&D5e etc.)
           const effectData: any = {
             name: condition.name || condition.label || condition.id,
             icon: condition.icon || condition.img,
@@ -8916,23 +8966,13 @@ export class FoundryDataAccess {
             effectData.statuses = [condition.id];
           }
 
-          // DSA5-specific: Copy all properties from the condition
-          // DSA5 conditions have different structure than D&D5e/PF2e
-          if ((game.system as any)?.id === 'dsa5') {
-            // For DSA5, use the condition's full data structure
-            Object.assign(effectData, {
-              flags: condition.flags || {},
-              changes: condition.changes || [],
-              duration: condition.duration || {},
-              origin: condition.origin,
-            });
-          }
-
           await actor.createEmbeddedDocuments('ActiveEffect', [effectData]);
         }
       } else {
         if (isPf2e) {
-          await actor.toggleCondition(condition.id, { active: false });
+          await actor.toggleStatusEffect(condition.id, { active: false });
+        } else if (isDsa5) {
+          await actor.removeCondition(condition.id);
         } else {
           // Remove the condition
           const effects = actor.effects?.contents || [];
@@ -8941,7 +8981,7 @@ export class FoundryDataAccess {
             if (effect.statuses?.has(data.conditionId)) {
               return true;
             }
-            // Check by name (fallback for all systems including DSA5)
+            // Check by name (fallback for other systems)
             if (effect.name?.toLowerCase() === data.conditionId.toLowerCase()) {
               return true;
             }

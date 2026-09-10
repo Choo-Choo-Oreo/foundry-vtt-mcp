@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { FoundryClient } from '../../foundry-client.js';
 import { Logger } from '../../logger.js';
 import { ErrorHandler } from '../../utils/error-handler.js';
+import { detectGameSystem, getCachedSystemId } from '../../utils/system-detection.js';
 
 export interface DSA5CharacterCreatorOptions {
   foundryClient: FoundryClient;
@@ -169,6 +170,44 @@ export class DSA5CharacterCreator {
       characterName,
       customization,
     });
+
+    // Every dnd5e- and wfrp4e-prefixed actor-mutating tool in this codebase
+    // checks the active world's game system before writing (see e.g.
+    // dnd5e-create-npc, dnd5e/npc.ts, and dnd5e-add-features-from-compendium,
+    // dnd5e/features.ts, both via detectGameSystem()) - this tool was the one
+    // exception, found by audit round 10 (2026-09-10) and fixed by round 11.
+    // Unlike sibling system-specific creators, this one calls the generic,
+    // system-agnostic foundry-mcp-bridge.createActorFromCompendium query
+    // rather than a dsa5-specific bridge handler, so there is no lower-level
+    // guard to fall back on - calling it against a pf2e/dnd5e world would
+    // create an actor from dsa5-shaped source data that the active system's
+    // data model was never meant to prepare.
+    //
+    // This check is deliberately OUTSIDE the try/catch below: that catch
+    // funnels every error through this.errorHandler.handleToolError(), whose
+    // generic-error fallback (error-handler.ts mapFoundryError()'s final
+    // branch, ~line 137) discards the original Error's message entirely -
+    // formatErrorMessage() (~line 153) never reads MCPError.details, so any
+    // thrown message that doesn't match one of mapFoundryError's hardcoded
+    // substring buckets ("permission", "not found", "actor creation", etc.)
+    // comes out as a content-free "An unexpected error occurred" with generic
+    // suggestions. Confirmed live by this file's own test (character-
+    // creator.test.ts): routing this exact guard error through the try/catch
+    // produced that generic string, not the "requires DSA5" message. Every
+    // dnd5e-/wfrp4e-prefixed tool that also uses handleToolError for its catch
+    // (dnd5e/npc.ts, dnd5e/features.ts) has the identical latent bug for
+    // their own system-mismatch message - not fixed here since correcting the
+    // shared ErrorHandler would change error text for every tool that uses
+    // it, well beyond this tool's scope; logged instead in the notes file.
+    // Throwing before the try block is the narrow, local fix: the message
+    // below propagates to the caller exactly as written.
+    const system = await detectGameSystem(this.foundryClient, this.logger);
+    if (system !== 'dsa5') {
+      throw new Error(
+        `create-dsa5-character-from-archetype requires DSA5 (Das Schwarze Auge). ` +
+          `Detected system: "${getCachedSystemId() ?? 'unknown'}".`
+      );
+    }
 
     try {
       // First, get the full archetype data
