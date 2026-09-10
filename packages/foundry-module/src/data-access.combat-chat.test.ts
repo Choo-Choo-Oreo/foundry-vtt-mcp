@@ -541,3 +541,66 @@ describe('FoundryDataAccess.manageCombat', () => {
     expect(result.alreadyInCombat).toEqual(['tok1']);
   });
 });
+
+describe('FoundryDataAccess.listScenes', () => {
+  let dataAccess: FoundryDataAccess;
+
+  function makeSizedCollection(size: number) {
+    return { size };
+  }
+
+  it('reports the raw stored width/height, not the padded canvas-rendering rect', async () => {
+    // Scene#dimensions (client/documents/scene.mjs:452-484) pads by `padding` and rounds
+    // up to the nearest 2x grid size - it is NOT the stored document size. Audit round 7
+    // logged a live 6000x4600-vs-4000x3000 discrepancy as suspected; round 9 confirmed the
+    // cause against the real client source and fixed listScenes to read scene.width/height
+    // (the raw schema fields) directly instead of preferring the padded scene.dimensions.
+    const scene: any = {
+      id: 'scene1',
+      name: 'Sample Scene',
+      active: true,
+      width: 4000,
+      height: 3000,
+      dimensions: { width: 6000, height: 4600 }, // padded - must NOT win
+      grid: { size: 100 },
+      walls: makeSizedCollection(0),
+      tokens: makeSizedCollection(16),
+      lights: makeSizedCollection(0),
+      sounds: makeSizedCollection(0),
+      regions: makeSizedCollection(0),
+      navigation: false,
+    };
+    stubGame({ scenes: { contents: [scene] } });
+    dataAccess = new FoundryDataAccess();
+
+    const [result] = await dataAccess.listScenes();
+    expect(result.dimensions).toEqual({ width: 4000, height: 3000 });
+    expect(result.tokens).toBe(16);
+  });
+
+  it('reports the regions count alongside walls/tokens/lighting/sounds', async () => {
+    // Scene Regions (common/documents/scene.mjs:151) are a first-class embedded collection
+    // since Foundry v12, used for GM automation triggers - previously invisible here.
+    const scene: any = {
+      id: 'scene1',
+      name: 'Sample Scene',
+      active: true,
+      width: 4000,
+      height: 3000,
+      grid: { size: 100 },
+      walls: makeSizedCollection(2),
+      tokens: makeSizedCollection(1),
+      lights: makeSizedCollection(3),
+      sounds: makeSizedCollection(0),
+      regions: makeSizedCollection(4),
+      navigation: false,
+    };
+    stubGame({ scenes: { contents: [scene] } });
+    dataAccess = new FoundryDataAccess();
+
+    const [result] = await dataAccess.listScenes();
+    expect(result.regions).toBe(4);
+    expect(result.walls).toBe(2);
+    expect(result.lighting).toBe(3);
+  });
+});

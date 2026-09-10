@@ -8369,9 +8369,17 @@ export class FoundryDataAccess {
         id: scene.id,
         name: scene.name,
         active: scene.active,
+        // `scene.dimensions` is Foundry's PADDED canvas-rendering rect
+        // (Scene#getDimensions(), client/documents/scene.mjs:452-484: pads by `padding`
+        // and rounds up to the nearest 2x grid size) - NOT the stored document size.
+        // `scene.width`/`scene.height` are the raw schema fields and match a verbatim
+        // toObject()/export exactly. The old `scene.dimensions?.width || scene.width`
+        // preferred the padded value, which is the confirmed cause of a live
+        // 6000x4600-vs-4000x3000 discrepancy logged as suspected in
+        // list-scenes-disagrees-with-document (audit round 9, source-verified).
         dimensions: {
-          width: scene.dimensions?.width || scene.width || 0,
-          height: scene.dimensions?.height || scene.height || 0,
+          width: scene.width || 0,
+          height: scene.height || 0,
         },
         gridSize: scene.grid?.size || 100,
         // Foundry v14 removed Scene#background; the image now lives on the Scene's first
@@ -8381,10 +8389,23 @@ export class FoundryDataAccess {
           scene.levels?.contents?.[0]?.background?.src ||
           scene.img ||
           '',
+        // NOTE (audit round 9): these read each live EmbeddedCollection's `.size`, which
+        // silently excludes any document that failed schema validation on load - Foundry
+        // tracks that document separately in `collection.invalidDocumentIds`
+        // (common/abstract/embedded-collection.mjs:85,204) rather than dropping it from
+        // `_source`. Such a document still exists in the stored/exported scene but will
+        // not be counted here - the likely mechanism behind the same known-issue entry's
+        // 15-live-vs-16-stored token count. Not fully confirmed without a scene known to
+        // carry an invalid embedded document.
         walls: scene.walls?.size || 0,
         tokens: scene.tokens?.size || 0,
         lighting: scene.lights?.size || 0,
         sounds: scene.sounds?.size || 0,
+        // Scene Regions (common/documents/scene.mjs:151, RegionDocument) are a first-class
+        // embedded collection since Foundry v12, used for GM automation (teleport/damage/
+        // fog-of-war triggers on enter/exit) - previously had no visibility anywhere in
+        // this bridge (added audit round 9).
+        regions: scene.regions?.size || 0,
         navigation: scene.navigation || false,
       }));
     } catch (error) {
