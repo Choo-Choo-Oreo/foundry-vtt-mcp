@@ -4354,6 +4354,22 @@ export class FoundryDataAccess {
         );
       }
 
+      // Audit round 20 (2026-09-10): same gap rounds 15/19 found and fixed in
+      // deleteWorldItems/deleteCompendiumPack/deleteActorItems/deleteActors and
+      // manageFolders/manageRollTables/manageMacros — this permanent delete
+      // never consulted `permissionManager`. queries.ts's `handleManageJournals`
+      // only calls `validateGMAccess()` (queries.ts:2408), which checks
+      // `game.user?.isGM` — a different axis than the "Allow Write Operations"
+      // setting a GM would flip to stop AI-driven writes/deletes (settings.ts
+      // ~243-250, ~552-557). A GM with that setting off could still have whole
+      // JournalEntry documents permanently deleted here.
+      const permissionCheck = permissionManager.checkWritePermission('deleteData', {
+        targetIds: resolved.map(r => r.id),
+      });
+      if (!permissionCheck.allowed) {
+        throw new Error(`${ERROR_MESSAGES.ACCESS_DENIED}: ${permissionCheck.reason}`);
+      }
+
       try {
         await (JournalEntry as any).deleteDocuments(resolved.map(r => r.id));
         const survivors = resolved.filter(r => (game as any).journal?.get(r.id));
@@ -4409,6 +4425,16 @@ export class FoundryDataAccess {
         `Page(s) not found in journal "${journal.name}": ${missingPages.join(', ')}. ` +
           `Nothing was deleted. Use list-journals to see each journal's page ids.`
       );
+    }
+
+    // Audit round 20 (2026-09-10): same gap as the whole-journal `delete`
+    // branch above — this permanent delete of embedded pages never
+    // consulted `permissionManager` either.
+    const pagePermissionCheck = permissionManager.checkWritePermission('deleteData', {
+      targetIds: resolvedPages.map(p => p.id),
+    });
+    if (!pagePermissionCheck.allowed) {
+      throw new Error(`${ERROR_MESSAGES.ACCESS_DENIED}: ${pagePermissionCheck.reason}`);
     }
 
     try {
