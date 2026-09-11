@@ -283,6 +283,16 @@ interface SceneRegionInfo {
   behaviors: Array<{ id: string; type: string; disabled: boolean }>;
 }
 
+interface ScenePositionCheck {
+  inBounds: boolean;
+  rect: SceneRect;
+  path?: {
+    from: { x: number; y: number };
+    to: { x: number; y: number };
+    blockedByWall: boolean;
+  };
+}
+
 interface SceneToken {
   id: string;
   name: string;
@@ -4041,6 +4051,75 @@ export class FoundryDataAccess {
     }
 
     return sceneData;
+  }
+
+  /**
+   * Check whether a scene coordinate is on the actual playable map, and
+   * (when `fromX`/`fromY` are also given) whether a movement-blocking wall
+   * crosses the straight line between the two points - for safe token
+   * placement/movement without needing a screenshot.
+   *
+   * Uses the same real collision primitive Foundry's own `Token#checkCollision`
+   * delegates to (client/canvas/placeables/token.mjs ~2766:
+   * `CONFIG.Canvas.polygonBackends[type].testCollision(origin, destination,
+   * {type, mode, ...})`), rather than hand-rolling wall-segment math: the
+   * `move` backend is `ClockwiseSweepPolygon` (client/config.mjs ~772), and
+   * its static `testCollision` (client/canvas/geometry/shapes/source-
+   * polygon.mjs ~326-341) is a documented, Token-independent entry point -
+   * it only needs an origin/destination pair and `{type: 'move'}`, not an
+   * actual placed Token.
+   */
+  async checkScenePosition(params: {
+    x: number;
+    y: number;
+    fromX?: number;
+    fromY?: number;
+  }): Promise<ScenePositionCheck> {
+    const scene = (game.scenes as any).current;
+    if (!scene) {
+      throw new Error(ERROR_MESSAGES.SCENE_NOT_FOUND);
+    }
+
+    const dims = (scene as any).dimensions ?? {};
+    const rect = dims.sceneRect ?? { x: 0, y: 0, width: scene.width, height: scene.height };
+
+    const inBounds =
+      params.x >= rect.x &&
+      params.x <= rect.x + rect.width &&
+      params.y >= rect.y &&
+      params.y <= rect.y + rect.height;
+
+    const result: ScenePositionCheck = {
+      inBounds,
+      rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+    };
+
+    if (params.fromX !== undefined && params.fromY !== undefined) {
+      const canvasGlobal = (globalThis as any).canvas;
+      if (!canvasGlobal?.ready) {
+        throw new Error(
+          'Canvas is not ready - the scene must be actively viewed in Foundry to check wall collisions.'
+        );
+      }
+      const moveBackend = (globalThis as any).CONFIG?.Canvas?.polygonBackends?.move;
+      if (!moveBackend?.testCollision) {
+        throw new Error(
+          'Movement collision backend (CONFIG.Canvas.polygonBackends.move) is not available.'
+        );
+      }
+      const blockedByWall = !!moveBackend.testCollision(
+        { x: params.fromX, y: params.fromY },
+        { x: params.x, y: params.y },
+        { type: 'move', mode: 'any' }
+      );
+      result.path = {
+        from: { x: params.fromX, y: params.fromY },
+        to: { x: params.x, y: params.y },
+        blockedByWall,
+      };
+    }
+
+    return result;
   }
 
   /**

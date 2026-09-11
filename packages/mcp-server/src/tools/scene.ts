@@ -71,6 +71,32 @@ export class SceneTools {
         },
       },
       {
+        name: 'check-scene-position',
+        description:
+          "Check whether a point is within the current scene's actual playable area, and " +
+          'optionally whether a movement-blocking wall crosses the line from another point to ' +
+          'it. Use this before placing or moving a token to confirm the target is on the map ' +
+          'and not behind a wall - answers "is this a safe spot" without needing a screenshot.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            x: { type: 'number', description: 'Target x coordinate (pixels) to check' },
+            y: { type: 'number', description: 'Target y coordinate (pixels) to check' },
+            fromX: {
+              type: 'number',
+              description:
+                'Optional origin x coordinate. When given with fromY, also checks whether a ' +
+                'movement-blocking wall crosses the straight line from (fromX,fromY) to (x,y).',
+            },
+            fromY: {
+              type: 'number',
+              description: 'Optional origin y coordinate - see fromX.',
+            },
+          },
+          required: ['x', 'y'],
+        },
+      },
+      {
         name: 'get-world-info',
         description: 'Get basic information about the Foundry world and system',
         inputSchema: {
@@ -128,6 +154,35 @@ export class SceneTools {
       this.logger.error('Failed to get current scene', error);
       throw new Error(
         `Failed to get current scene: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  async handleCheckScenePosition(args: any): Promise<any> {
+    const schema = z.object({
+      x: z.number(),
+      y: z.number(),
+      fromX: z.number().optional(),
+      fromY: z.number().optional(),
+    });
+
+    const { x, y, fromX, fromY } = schema.parse(args);
+
+    this.logger.info('Checking scene position', { x, y, fromX, fromY });
+
+    try {
+      const result = await this.foundryClient.query('foundry-mcp-bridge.checkScenePosition', {
+        x,
+        y,
+        fromX,
+        fromY,
+      });
+
+      return result;
+    } catch (error) {
+      this.logger.error('Failed to check scene position', error);
+      throw new Error(
+        `Failed to check scene position: ${error instanceof Error ? error.message : 'Unknown error'}`
       );
     }
   }

@@ -41,6 +41,7 @@ export class QueryHandlers {
 
     // Scene queries
     CONFIG.queries[`${modulePrefix}.getActiveScene`] = this.handleGetActiveScene.bind(this);
+    CONFIG.queries[`${modulePrefix}.checkScenePosition`] = this.handleCheckScenePosition.bind(this);
     CONFIG.queries[`${modulePrefix}.list-scenes`] = this.handleListScenes.bind(this);
     CONFIG.queries[`${modulePrefix}.switch-scene`] = this.handleSwitchScene.bind(this);
 
@@ -426,6 +427,34 @@ export class QueryHandlers {
     } catch (error) {
       throw new Error(
         `Failed to get active scene: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  /**
+   * Handle check scene position request
+   */
+  private async handleCheckScenePosition(data: {
+    x: number;
+    y: number;
+    fromX?: number;
+    fromY?: number;
+  }): Promise<any> {
+    try {
+      // SECURITY: Silent GM validation
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      this.dataAccess.validateFoundryState();
+      if (typeof data?.x !== 'number' || typeof data?.y !== 'number') {
+        throw new Error('x and y are required numbers');
+      }
+      return await this.dataAccess.checkScenePosition(data);
+    } catch (error) {
+      throw new Error(
+        `Failed to check scene position: ${error instanceof Error ? error.message : 'Unknown error'}`
       );
     }
   }
