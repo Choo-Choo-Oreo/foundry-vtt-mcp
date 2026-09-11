@@ -24,7 +24,11 @@ export class SceneTools {
       {
         name: 'get-current-scene',
         description:
-          'Get information about the currently active scene, including tokens and layout',
+          'Get information about the currently active scene: layout, grid, the real playable ' +
+          'rectangle (accounting for padding), tokens, and - with the include* flags - real wall ' +
+          'segment coordinates, light/sound positions and radii, and region shapes. Use ' +
+          'includeWalls/rect/grid to reason about safe token placement or map geometry without ' +
+          'needing a screenshot.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -36,6 +40,31 @@ export class SceneTools {
             includeHidden: {
               type: 'boolean',
               description: 'Whether to include hidden tokens and elements (default: false)',
+              default: false,
+            },
+            includeWalls: {
+              type: 'boolean',
+              description:
+                "Include each wall segment's coordinates (c: [x1,y1,x2,y2]) and its move/sight/" +
+                'light/sound/door flags (default: false)',
+              default: false,
+            },
+            includeLights: {
+              type: 'boolean',
+              description:
+                "Include each ambient light's position, rotation, dim/bright radius, and color (default: false)",
+              default: false,
+            },
+            includeSounds: {
+              type: 'boolean',
+              description:
+                "Include each ambient sound's position, radius, and audio path (default: false)",
+              default: false,
+            },
+            includeRegions: {
+              type: 'boolean',
+              description:
+                "Include each Region document's shapes and attached behaviors (default: false)",
               default: false,
             },
           },
@@ -56,14 +85,37 @@ export class SceneTools {
     const schema = z.object({
       includeTokens: z.boolean().default(true),
       includeHidden: z.boolean().default(false),
+      includeWalls: z.boolean().default(false),
+      includeLights: z.boolean().default(false),
+      includeSounds: z.boolean().default(false),
+      includeRegions: z.boolean().default(false),
     });
 
-    const { includeTokens, includeHidden } = schema.parse(args);
+    const {
+      includeTokens,
+      includeHidden,
+      includeWalls,
+      includeLights,
+      includeSounds,
+      includeRegions,
+    } = schema.parse(args);
 
-    this.logger.info('Getting current scene information', { includeTokens, includeHidden });
+    this.logger.info('Getting current scene information', {
+      includeTokens,
+      includeHidden,
+      includeWalls,
+      includeLights,
+      includeSounds,
+      includeRegions,
+    });
 
     try {
-      const sceneData = await this.foundryClient.query('foundry-mcp-bridge.getActiveScene');
+      const sceneData = await this.foundryClient.query('foundry-mcp-bridge.getActiveScene', {
+        includeWalls,
+        includeLights,
+        includeSounds,
+        includeRegions,
+      });
 
       this.logger.debug('Successfully retrieved scene data', {
         sceneId: sceneData.id,
@@ -110,6 +162,11 @@ export class SceneTools {
         height: sceneData.height,
         padding: sceneData.padding,
       },
+      // The actual playable rectangle in pixel coordinates, accounting for
+      // padding and grid rounding - use this, not `dimensions`, to check
+      // whether a point is on the map.
+      rect: sceneData.rect,
+      grid: sceneData.grid,
       hasBackground: !!sceneData.background,
       navigation: sceneData.navigation,
       elements: {
@@ -119,6 +176,54 @@ export class SceneTools {
         notes: sceneData.notes?.length || 0,
       },
     };
+
+    if (sceneData.wallDetails) {
+      response.walls = sceneData.wallDetails.map((wall: any) => ({
+        id: wall.id,
+        from: { x: wall.c[0], y: wall.c[1] },
+        to: { x: wall.c[2], y: wall.c[3] },
+        blocksMovement: wall.move !== 0,
+        blocksSight: wall.sight !== 0,
+        blocksLight: wall.light !== 0,
+        blocksSound: wall.sound !== 0,
+        isDoor: wall.door !== 0,
+        doorState: wall.door !== 0 ? this.getDoorStateName(wall.ds) : undefined,
+        isSecretDoor: wall.door === 2,
+      }));
+    }
+
+    if (sceneData.lightDetails) {
+      response.lights = sceneData.lightDetails.map((light: any) => ({
+        id: light.id,
+        position: { x: light.x, y: light.y },
+        rotation: light.rotation,
+        hidden: light.hidden,
+        dimRadius: light.dim,
+        brightRadius: light.bright,
+        angle: light.angle,
+        color: light.color,
+      }));
+    }
+
+    if (sceneData.soundDetails) {
+      response.sounds = sceneData.soundDetails.map((sound: any) => ({
+        id: sound.id,
+        position: { x: sound.x, y: sound.y },
+        radius: sound.radius,
+        hidden: sound.hidden,
+        path: sound.path,
+      }));
+    }
+
+    if (sceneData.regionDetails) {
+      response.regions = sceneData.regionDetails.map((region: any) => ({
+        id: region.id,
+        name: region.name,
+        hidden: region.hidden,
+        shapes: region.shapes,
+        behaviors: region.behaviors,
+      }));
+    }
 
     if (includeTokens && sceneData.tokens) {
       response.tokens = this.formatTokens(sceneData.tokens, includeHidden);
@@ -228,6 +333,20 @@ export class SceneTools {
         return 'neutral';
       case 1:
         return 'friendly';
+      default:
+        return 'unknown';
+    }
+  }
+
+  // CONST.WALL_DOOR_STATES (common/constants.mjs): 0=closed, 1=open, 2=locked.
+  private getDoorStateName(ds: number): string {
+    switch (ds) {
+      case 0:
+        return 'closed';
+      case 1:
+        return 'open';
+      case 2:
+        return 'locked';
       default:
         return 'unknown';
     }

@@ -196,11 +196,91 @@ interface SceneInfo {
   padding: number;
   active: boolean;
   navigation: boolean;
+  // Grid config (Scene#grid, common/documents/scene.mjs ~89-101) and the
+  // real playable rectangle (client/documents/scene.mjs getDimensions()
+  // ~447-484, exposed as the live Scene's `.dimensions.sceneRect` -
+  // accounts for padding, unlike raw width/height/padding above).
+  grid: SceneGridInfo;
+  rect: SceneRect;
   tokens: SceneToken[];
   walls: number;
   lights: number;
   sounds: number;
   notes: SceneNote[];
+  // Optional geometry detail, only populated when the corresponding
+  // include* flag is passed to getActiveScene() - see queries.ts
+  // handleGetActiveScene and mcp-server tools/scene.ts.
+  wallDetails?: SceneWallInfo[];
+  lightDetails?: SceneLightInfo[];
+  soundDetails?: SceneSoundInfo[];
+  regionDetails?: SceneRegionInfo[];
+}
+
+interface SceneGridInfo {
+  type: number;
+  typeName: string;
+  size: number;
+  distance: number;
+  units: string;
+}
+
+interface SceneRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+// Field names verified against the actually-installed Foundry v14.361.0
+// client source: common/documents/wall.mjs defineSchema() ~53-79 (`c` is the
+// length-4 [x1,y1,x2,y2] segment; move/sight/light/sound use
+// CONST.EDGE_SENSE_TYPES: 0=none,10=normal,20=limited; door uses
+// CONST.WALL_DOOR_TYPES: 0=none,1=door,2=secret; ds uses
+// CONST.WALL_DOOR_STATES: 0=closed,1=open,2=locked).
+interface SceneWallInfo {
+  id: string;
+  c: number[];
+  move: number;
+  sight: number;
+  light: number;
+  sound: number;
+  dir: number;
+  door: number;
+  ds: number;
+}
+
+// common/documents/ambient-light.mjs defineSchema() ~34-49; `config` fields
+// (dim/bright/angle/color) from common/data/data.mjs LightData ~44-57.
+interface SceneLightInfo {
+  id: string;
+  x: number;
+  y: number;
+  rotation: number;
+  hidden: boolean;
+  dim: number;
+  bright: number;
+  angle: number;
+  color?: string | null;
+}
+
+// common/documents/ambient-sound.mjs defineSchema() ~36-65.
+interface SceneSoundInfo {
+  id: string;
+  x: number;
+  y: number;
+  radius: number;
+  hidden: boolean;
+  path?: string;
+}
+
+// common/documents/region.mjs defineSchema() ~51-89.
+interface SceneRegionInfo {
+  id: string;
+  name: string;
+  shapes: unknown[];
+  hidden: boolean;
+  visibility: number;
+  behaviors: Array<{ id: string; type: string; disabled: boolean }>;
 }
 
 interface SceneToken {
@@ -3826,11 +3906,34 @@ export class FoundryDataAccess {
   /**
    * Get active scene information
    */
-  async getActiveScene(): Promise<SceneInfo> {
+  // Grid type names for CONST.GRID_TYPES (common/constants.mjs ~562-597):
+  // 0=GRIDLESS, 1=SQUARE, 2=HEXODDR, 3=HEXEVENR, 4=HEXODDQ, 5=HEXEVENQ.
+  private static readonly GRID_TYPE_NAMES: Record<number, string> = {
+    0: 'gridless',
+    1: 'square',
+    2: 'hexOddR',
+    3: 'hexEvenR',
+    4: 'hexOddQ',
+    5: 'hexEvenQ',
+  };
+
+  async getActiveScene(options?: {
+    includeWalls?: boolean;
+    includeLights?: boolean;
+    includeSounds?: boolean;
+    includeRegions?: boolean;
+  }): Promise<SceneInfo> {
     const scene = (game.scenes as any).current;
     if (!scene) {
       throw new Error(ERROR_MESSAGES.SCENE_NOT_FOUND);
     }
+
+    // scene.dimensions is a live computed property (client/documents/scene.mjs
+    // getDimensions() ~447-484) recomputed on scene/grid update; it is the only
+    // reliable source for the actual playable rect since it, unlike raw
+    // width/height/padding, accounts for grid-size rounding and hex layouts.
+    const dims = (scene as any).dimensions ?? {};
+    const sceneRect = dims.sceneRect ?? {};
 
     const sceneData: SceneInfo = {
       id: scene.id,
@@ -3847,6 +3950,19 @@ export class FoundryDataAccess {
       padding: scene.padding,
       active: scene.active,
       navigation: scene.navigation,
+      grid: {
+        type: scene.grid?.type,
+        typeName: FoundryDataAccess.GRID_TYPE_NAMES[scene.grid?.type] ?? 'unknown',
+        size: scene.grid?.size,
+        distance: scene.grid?.distance,
+        units: scene.grid?.units,
+      },
+      rect: {
+        x: sceneRect.x ?? 0,
+        y: sceneRect.y ?? 0,
+        width: sceneRect.width ?? scene.width,
+        height: sceneRect.height ?? scene.height,
+      },
       tokens: scene.tokens.map((token: any) => ({
         id: token.id,
         name: token.name,
@@ -3869,6 +3985,60 @@ export class FoundryDataAccess {
         y: note.y,
       })),
     };
+
+    if (options?.includeWalls) {
+      sceneData.wallDetails = scene.walls.map((wall: any) => ({
+        id: wall.id,
+        c: wall.c,
+        move: wall.move,
+        sight: wall.sight,
+        light: wall.light,
+        sound: wall.sound,
+        dir: wall.dir,
+        door: wall.door,
+        ds: wall.ds,
+      }));
+    }
+
+    if (options?.includeLights) {
+      sceneData.lightDetails = scene.lights.map((light: any) => ({
+        id: light.id,
+        x: light.x,
+        y: light.y,
+        rotation: light.rotation,
+        hidden: light.hidden,
+        dim: light.config?.dim,
+        bright: light.config?.bright,
+        angle: light.config?.angle,
+        color: light.config?.color ?? null,
+      }));
+    }
+
+    if (options?.includeSounds) {
+      sceneData.soundDetails = scene.sounds.map((sound: any) => ({
+        id: sound.id,
+        x: sound.x,
+        y: sound.y,
+        radius: sound.radius,
+        hidden: sound.hidden,
+        path: sound.path || undefined,
+      }));
+    }
+
+    if (options?.includeRegions) {
+      sceneData.regionDetails = (scene.regions ?? []).map((region: any) => ({
+        id: region.id,
+        name: region.name,
+        shapes: region.shapes ?? [],
+        hidden: region.hidden,
+        visibility: region.visibility,
+        behaviors: (region.behaviors ?? []).map((behavior: any) => ({
+          id: behavior.id,
+          type: behavior.type,
+          disabled: behavior.disabled,
+        })),
+      }));
+    }
 
     return sceneData;
   }

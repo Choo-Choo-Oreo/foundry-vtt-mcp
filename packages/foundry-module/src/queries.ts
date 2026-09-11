@@ -408,7 +408,12 @@ export class QueryHandlers {
   /**
    * Handle get active scene request
    */
-  private async handleGetActiveScene(): Promise<any> {
+  private async handleGetActiveScene(data?: {
+    includeWalls?: boolean;
+    includeLights?: boolean;
+    includeSounds?: boolean;
+    includeRegions?: boolean;
+  }): Promise<any> {
     try {
       // SECURITY: Silent GM validation
       const gmCheck = this.validateGMAccess();
@@ -417,7 +422,7 @@ export class QueryHandlers {
       }
 
       this.dataAccess.validateFoundryState();
-      return await this.dataAccess.getActiveScene();
+      return await this.dataAccess.getActiveScene(data);
     } catch (error) {
       throw new Error(
         `Failed to get active scene: ${error instanceof Error ? error.message : 'Unknown error'}`
