@@ -42,6 +42,7 @@ export class QueryHandlers {
     // Scene queries
     CONFIG.queries[`${modulePrefix}.getActiveScene`] = this.handleGetActiveScene.bind(this);
     CONFIG.queries[`${modulePrefix}.checkScenePosition`] = this.handleCheckScenePosition.bind(this);
+    CONFIG.queries[`${modulePrefix}.get-scene-map-image`] = this.handleGetSceneMapImage.bind(this);
     CONFIG.queries[`${modulePrefix}.list-scenes`] = this.handleListScenes.bind(this);
     CONFIG.queries[`${modulePrefix}.switch-scene`] = this.handleSwitchScene.bind(this);
 
@@ -455,6 +456,33 @@ export class QueryHandlers {
     } catch (error) {
       throw new Error(
         `Failed to check scene position: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  /**
+   * Handle get scene map image request (grid-overlay tile rendering)
+   */
+  private async handleGetSceneMapImage(data?: {
+    region?: { colStart: number; rowStart: number; colEnd: number; rowEnd: number };
+    tileSize?: number;
+    maxTiles?: number;
+    gridLabelInterval?: number;
+    showWalls?: boolean;
+    showRect?: boolean;
+  }): Promise<any> {
+    try {
+      // SECURITY: Silent GM validation
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      this.dataAccess.validateFoundryState();
+      return await this.dataAccess.getSceneMapImage(data ?? {});
+    } catch (error) {
+      throw new Error(
+        `Failed to get scene map image: ${error instanceof Error ? error.message : 'Unknown error'}`
       );
     }
   }

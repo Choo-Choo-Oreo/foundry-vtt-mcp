@@ -1742,6 +1742,10 @@ class PersistentCreatureIndex {
 export class FoundryDataAccess {
   private moduleId: string = MODULE_ID;
   private persistentIndex: PersistentCreatureIndex = new PersistentCreatureIndex();
+  // Decoded background bitmap for the last scene/getSceneMapImage call - avoids
+  // re-fetching and re-decoding a multi-megapixel map image on every tile request
+  // during a survey (each call only needs a fresh crop, not a fresh decode).
+  private mapImageCache: { sceneId: string; src: string; bitmap: ImageBitmap } | null = null;
 
   constructor() {}
 
@@ -4120,6 +4124,285 @@ export class FoundryDataAccess {
     }
 
     return result;
+  }
+
+  /** Uint8Array -> base64 without spreading the whole buffer into String.fromCharCode
+   * (a multi-megabyte spread blows the call-stack argument limit); chunked instead. */
+  private static bytesToBase64(bytes: Uint8Array): string {
+    const CHUNK = 0x8000;
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + CHUNK)));
+    }
+    return btoa(binary);
+  }
+
+  /**
+   * Render the current scene's background image with a labeled grid overlay
+   * (plus optionally existing walls and the playable-rect boundary) as one or
+   * more PNG tiles, for tracing real wall/light geometry precisely instead of
+   * guessing from a downscaled screenshot.
+   *
+   * `region` is in grid cells relative to the playable rect's origin (col 0 /
+   * row 0 = `rect.x`/`rect.y`) - the same coordinate frame used for wall `c`
+   * arrays once multiplied by `grid.size` and offset by `rect.x`/`rect.y`, so
+   * a caller never has to do that arithmetic by hand. Labels on the image are
+   * the actual scene coordinates, not grid indices, for the same reason.
+   *
+   * Tiling is bounded by `maxTiles` (checked before any drawing) rather than
+   * silently rendering an arbitrarily large region - the mcp-server's query
+   * round-trip has a fixed 10s timeout (foundry-connector.ts), so a request
+   * that would need many tiles fails fast with a clear "shrink the region"
+   * error instead of timing out silently.
+   */
+  async getSceneMapImage(params: {
+    region?: { colStart: number; rowStart: number; colEnd: number; rowEnd: number };
+    tileSize?: number;
+    maxTiles?: number;
+    gridLabelInterval?: number;
+    showWalls?: boolean;
+    showRect?: boolean;
+  }): Promise<{
+    sceneId: string;
+    sceneName: string;
+    grid: { size: number; distance: number; units: string };
+    rect: { x: number; y: number; width: number; height: number };
+    region: { colStart: number; rowStart: number; colEnd: number; rowEnd: number };
+    tiles: Array<{
+      gridCells: { colStart: number; rowStart: number; colEnd: number; rowEnd: number };
+      sceneBounds: { x1: number; y1: number; x2: number; y2: number };
+      pixelSize: { width: number; height: number };
+      dataBase64: string;
+    }>;
+  }> {
+    const scene = (game.scenes as any).current;
+    if (!scene) {
+      throw new Error(ERROR_MESSAGES.SCENE_NOT_FOUND);
+    }
+
+    const backgroundSrc: string | undefined =
+      scene._source?.background?.src ||
+      (scene as any).levels?.contents?.[0]?.background?.src ||
+      undefined;
+    if (!backgroundSrc) {
+      throw new Error('This scene has no background image to render.');
+    }
+
+    const dims = (scene as any).dimensions ?? {};
+    const rect = dims.sceneRect ?? { x: 0, y: 0, width: scene.width, height: scene.height };
+    const gridSize: number = scene.grid?.size ?? 100;
+
+    // Decode (or reuse the cached decode of) the background image.
+    let bitmap: ImageBitmap;
+    if (this.mapImageCache?.sceneId === scene.id && this.mapImageCache?.src === backgroundSrc) {
+      bitmap = this.mapImageCache.bitmap;
+    } else {
+      const response = await fetch(backgroundSrc);
+      if (!response.ok) {
+        throw new Error(
+          `Could not read background image "${backgroundSrc}": HTTP ${response.status}`
+        );
+      }
+      const blob = await response.blob();
+      bitmap = await createImageBitmap(blob);
+      this.mapImageCache?.bitmap?.close?.();
+      this.mapImageCache = { sceneId: scene.id, src: backgroundSrc, bitmap };
+    }
+
+    const pxPerUnitX = bitmap.width / scene.width;
+    const pxPerUnitY = bitmap.height / scene.height;
+
+    const totalCols = Math.ceil(rect.width / gridSize);
+    const totalRows = Math.ceil(rect.height / gridSize);
+    const region = {
+      colStart: Math.max(0, Math.floor(params.region?.colStart ?? 0)),
+      rowStart: Math.max(0, Math.floor(params.region?.rowStart ?? 0)),
+      colEnd: Math.min(totalCols, Math.ceil(params.region?.colEnd ?? totalCols)),
+      rowEnd: Math.min(totalRows, Math.ceil(params.region?.rowEnd ?? totalRows)),
+    };
+    if (region.colEnd <= region.colStart || region.rowEnd <= region.rowStart) {
+      throw new Error(
+        `Empty or invalid region: cols ${region.colStart}-${region.colEnd}, rows ${region.rowStart}-${region.rowEnd} ` +
+          `(scene grid is ${totalCols} cols x ${totalRows} rows).`
+      );
+    }
+
+    const tileSize = Math.min(Math.max(Math.floor(params.tileSize ?? 1200), 400), 2000);
+    const gridLabelInterval = Math.max(1, Math.floor(params.gridLabelInterval ?? 5));
+    const showWalls = params.showWalls !== false;
+    const showRect = params.showRect !== false;
+    const maxTiles = Math.min(Math.max(Math.floor(params.maxTiles ?? 6), 1), 9);
+
+    const regionX1 = rect.x + region.colStart * gridSize;
+    const regionY1 = rect.y + region.rowStart * gridSize;
+    const regionX2 = rect.x + region.colEnd * gridSize;
+    const regionY2 = rect.y + region.rowEnd * gridSize;
+    const regionPxW = (regionX2 - regionX1) * pxPerUnitX;
+    const regionPxH = (regionY2 - regionY1) * pxPerUnitY;
+
+    const tilesX = Math.max(1, Math.ceil(regionPxW / tileSize));
+    const tilesY = Math.max(1, Math.ceil(regionPxH / tileSize));
+    if (tilesX * tilesY > maxTiles) {
+      throw new Error(
+        `Region cols ${region.colStart}-${region.colEnd} x rows ${region.rowStart}-${region.rowEnd} ` +
+          `would need ${tilesX * tilesY} tiles at tileSize ${tileSize} (max ${maxTiles}). ` +
+          `Pass a smaller region, a larger tileSize (max 2000), or a higher maxTiles (max 9).`
+      );
+    }
+
+    // Whole-cell tile boundaries only - a fractional split (e.g. 9 cols / 2 tiles =
+    // 4.5) would land a tile edge mid-cell, so the rounded gridCells reported back
+    // would silently disagree with where the image was actually cropped.
+    const colsPerTile = Math.ceil((region.colEnd - region.colStart) / tilesX);
+    const rowsPerTile = Math.ceil((region.rowEnd - region.rowStart) / tilesY);
+
+    let walls: number[][] = [];
+    if (showWalls) {
+      walls = scene.walls.map((w: any) => w.c as number[]);
+    }
+
+    const tiles: Array<{
+      gridCells: { colStart: number; rowStart: number; colEnd: number; rowEnd: number };
+      sceneBounds: { x1: number; y1: number; x2: number; y2: number };
+      pixelSize: { width: number; height: number };
+      dataBase64: string;
+    }> = [];
+
+    for (let ty = 0; ty < tilesY; ty++) {
+      for (let tx = 0; tx < tilesX; tx++) {
+        const tileColStart = region.colStart + tx * colsPerTile;
+        const tileColEnd =
+          tx === tilesX - 1 ? region.colEnd : region.colStart + (tx + 1) * colsPerTile;
+        const tileRowStart = region.rowStart + ty * rowsPerTile;
+        const tileRowEnd =
+          ty === tilesY - 1 ? region.rowEnd : region.rowStart + (ty + 1) * rowsPerTile;
+
+        const sx1 = rect.x + tileColStart * gridSize;
+        const sy1 = rect.y + tileRowStart * gridSize;
+        const sx2 = rect.x + tileColEnd * gridSize;
+        const sy2 = rect.y + tileRowEnd * gridSize;
+
+        // The background image's pixel (0,0) is scene coordinate (rect.x, rect.y),
+        // not (0,0) - padding offsets the playable rect from the canvas origin.
+        // Sampling from the bitmap must subtract that offset; tile-local overlay
+        // math (sceneToPx below) stays relative to sx1/sy1 and needs no offset.
+        const srcX = Math.max(0, (sx1 - rect.x) * pxPerUnitX);
+        const srcY = Math.max(0, (sy1 - rect.y) * pxPerUnitY);
+        const srcW = Math.min(bitmap.width - srcX, (sx2 - sx1) * pxPerUnitX);
+        const srcH = Math.min(bitmap.height - srcY, (sy2 - sy1) * pxPerUnitY);
+
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(srcW);
+        canvas.height = Math.round(srcH);
+        const ctx = canvas.getContext('2d');
+        if (!ctx) throw new Error('Could not get a 2d canvas context in the Foundry client');
+        ctx.drawImage(bitmap, srcX, srcY, srcW, srcH, 0, 0, canvas.width, canvas.height);
+
+        const sceneToPx = (sx: number, sy: number) => ({
+          px: (sx - sx1) * pxPerUnitX,
+          py: (sy - sy1) * pxPerUnitY,
+        });
+
+        // Grid lines, minor every cell and major (labeled) every gridLabelInterval cells.
+        const firstMinorX = Math.ceil(sx1 / gridSize) * gridSize;
+        for (let gx = firstMinorX; gx <= sx2; gx += gridSize) {
+          const isMajor = Math.round(gx / gridSize) % gridLabelInterval === 0;
+          const { px } = sceneToPx(gx, sy1);
+          ctx.strokeStyle = isMajor ? 'rgba(255,0,0,0.9)' : 'rgba(255,255,0,0.45)';
+          ctx.lineWidth = isMajor ? 2 : 1;
+          ctx.beginPath();
+          ctx.moveTo(px, 0);
+          ctx.lineTo(px, canvas.height);
+          ctx.stroke();
+        }
+        const firstMinorY = Math.ceil(sy1 / gridSize) * gridSize;
+        for (let gy = firstMinorY; gy <= sy2; gy += gridSize) {
+          const isMajor = Math.round(gy / gridSize) % gridLabelInterval === 0;
+          const { py } = sceneToPx(sx1, gy);
+          ctx.strokeStyle = isMajor ? 'rgba(255,0,0,0.9)' : 'rgba(255,255,0,0.45)';
+          ctx.lineWidth = isMajor ? 2 : 1;
+          ctx.beginPath();
+          ctx.moveTo(0, py);
+          ctx.lineTo(canvas.width, py);
+          ctx.stroke();
+        }
+        // Labels at major intersections, as the real scene (x,y) - not grid index -
+        // so a wall's `c` array can be copied straight off the image.
+        ctx.font = 'bold 18px sans-serif';
+        for (let gx = firstMinorX; gx <= sx2; gx += gridSize) {
+          if (Math.round(gx / gridSize) % gridLabelInterval !== 0) continue;
+          for (let gy = firstMinorY; gy <= sy2; gy += gridSize) {
+            if (Math.round(gy / gridSize) % gridLabelInterval !== 0) continue;
+            const { px, py } = sceneToPx(gx, gy);
+            const label = `${Math.round(gx)},${Math.round(gy)}`;
+            const textWidth = ctx.measureText(label).width;
+            ctx.fillStyle = 'rgba(0,0,0,0.7)';
+            ctx.fillRect(px + 2, py + 2, textWidth + 4, 20);
+            ctx.fillStyle = '#ffff00';
+            ctx.fillText(label, px + 4, py + 17);
+          }
+        }
+
+        if (showRect) {
+          const topLeft = sceneToPx(rect.x, rect.y);
+          const bottomRight = sceneToPx(rect.x + rect.width, rect.y + rect.height);
+          ctx.strokeStyle = 'rgba(0,255,0,0.9)';
+          ctx.lineWidth = 3;
+          ctx.strokeRect(
+            topLeft.px,
+            topLeft.py,
+            bottomRight.px - topLeft.px,
+            bottomRight.py - topLeft.py
+          );
+        }
+
+        if (walls.length) {
+          ctx.strokeStyle = 'rgba(0,255,255,0.95)';
+          ctx.lineWidth = 3;
+          for (const c of walls) {
+            const from = sceneToPx(c[0], c[1]);
+            const to = sceneToPx(c[2], c[3]);
+            ctx.beginPath();
+            ctx.moveTo(from.px, from.py);
+            ctx.lineTo(to.px, to.py);
+            ctx.stroke();
+          }
+        }
+
+        const tileBlob: Blob | null = await new Promise(resolve =>
+          canvas.toBlob(resolve, 'image/png')
+        );
+        if (!tileBlob) throw new Error('Canvas produced no PNG data for a map tile');
+        const arrayBuf = await tileBlob.arrayBuffer();
+        const dataBase64 = FoundryDataAccess.bytesToBase64(new Uint8Array(arrayBuf));
+
+        tiles.push({
+          gridCells: {
+            colStart: Math.round(tileColStart),
+            rowStart: Math.round(tileRowStart),
+            colEnd: Math.round(tileColEnd),
+            rowEnd: Math.round(tileRowEnd),
+          },
+          sceneBounds: {
+            x1: Math.round(sx1),
+            y1: Math.round(sy1),
+            x2: Math.round(sx2),
+            y2: Math.round(sy2),
+          },
+          pixelSize: { width: canvas.width, height: canvas.height },
+          dataBase64,
+        });
+      }
+    }
+
+    return {
+      sceneId: scene.id,
+      sceneName: scene.name,
+      grid: { size: gridSize, distance: scene.grid?.distance, units: scene.grid?.units },
+      rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+      region,
+      tiles,
+    };
   }
 
   /**

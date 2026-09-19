@@ -21,6 +21,7 @@ import { CharacterTools } from './tools/character.js';
 import { CompendiumTools } from './tools/compendium.js';
 
 import { SceneTools } from './tools/scene.js';
+import { SceneMapImageTools } from './tools/scene-map-image.js';
 
 import { ActorCreationTools } from './tools/actor-creation.js';
 import { ActorManagementTools } from './tools/actor-management.js';
@@ -1204,6 +1205,7 @@ async function startBackend(): Promise<void> {
   const compendiumTools = new CompendiumTools({ foundryClient, logger, systemRegistry });
 
   const sceneTools = new SceneTools({ foundryClient, logger });
+  const sceneMapImageTools = new SceneMapImageTools({ foundryClient, logger });
 
   const actorCreationTools = new ActorCreationTools({ foundryClient, logger });
   const actorManagementTools = new ActorManagementTools({ foundryClient, logger, systemRegistry });
@@ -1445,6 +1447,7 @@ async function startBackend(): Promise<void> {
     ...compendiumTools.getToolDefinitions(),
 
     ...sceneTools.getToolDefinitions(),
+    ...sceneMapImageTools.getToolDefinitions(),
 
     ...actorCreationTools.getToolDefinitions(),
     ...actorManagementTools.getToolDefinitions(),
@@ -1622,6 +1625,11 @@ async function startBackend(): Promise<void> {
 
                 case 'get-world-info':
                   result = await sceneTools.handleGetWorldInfo(args);
+
+                  break;
+
+                case 'get-scene-map-image':
+                  result = await sceneMapImageTools.handleGetSceneMapImage(args);
 
                   break;
 
